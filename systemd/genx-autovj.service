@@ -1,0 +1,13 @@
+[Unit]
+Description=GenX71 AutoVJ 24/7 TikTok Studio & Scheduler
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/antigravity/sdewis/genx71_autovj
+ExecStart=/home/antigravity/sdewis/genx71_autovj/.venv/bin/uvicorn api.app:app --host 0.0.0.0 --port 8710
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#090a10" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>GenX71 AutoVJ Studio</title>
+  <link rel="manifest" href="/manifest.json" />
+  <link rel="icon" href="/logo.png" type="image/png" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <img src="/logo.png" alt="Seany GenX" class="brand-logo" />
+      <div>
+        <h1>GENX71 <span class="accent">AUTOVJ</span></h1>
+        <p class="subtitle">1978–1996 Automated TikTok Studio</p>
+      </div>
+    </div>
+    <div class="status-pills">
+      <span id="daemon-pill" class="pill pill-off">Daemon: --</span>
+      <span id="cookie-pill" class="pill pill-warn">Cookies: --</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- TAB 1: STUDIO / DASHBOARD -->
+    <section id="tab-studio" class="tab-panel active">
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Next Jittered Post</span>
+          <strong id="stat-next-run" class="stat-val">--</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Available Pool</span>
+          <strong id="stat-avail" class="stat-val">--</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Wildcards Left</span>
+          <strong id="stat-wildcards" class="stat-val">--</strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Posted / Rendered</span>
+          <strong id="stat-posted" class="stat-val">--</strong>
+        </div>
+      </div>
+
+      <div class="card studio-controls">
+        <h2>Instant Video Generator</h2>
+        <div class="form-row">
+          <label for="gen-template">Visual Template</label>
+          <select id="gen-template">
+            <option value="vinyl">Spinning Vinyl + Sleeve</option>
+            <option value="cd">3D CD Jewel Case</option>
+            <option value="retro">Retro Audiophile Card</option>
+          </select>
+        </div>
+
+        <div class="btn-group">
+          <button id="btn-gen-random" class="btn btn-primary">Generate GenX Hit</button>
+          <button id="btn-gen-wildcard" class="btn btn-accent">Wildcard Gem (Top 21–40)</button>
+        </div>
+
+        <div id="gen-progress-box" class="progress-box hidden">
+          <div class="progress-bar-bg">
+            <div id="gen-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+          </div>
+          <p id="gen-progress-msg" class="progress-msg">Starting...</p>
+        </div>
+      </div>
+
+      <div id="preview-card" class="card preview-card hidden">
+        <div class="preview-header">
+          <h3 id="preview-title">Latest Render</h3>
+          <span id="preview-badge" class="badge">--</span>
+        </div>
+        <div class="video-wrapper">
+          <video id="preview-video" controls playsinline></video>
+        </div>
+        <div class="btn-group" style="margin-top: 12px;">
+          <button id="btn-publish-preview" class="btn btn-primary">Send to TikTok</button>
+          <a id="btn-download-preview" class="btn btn-secondary" download>Download MP4</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB 2: POST HISTORY -->
+    <section id="tab-posts" class="tab-panel">
+      <div class="section-header">
+        <h2>Post History &amp; Deduplication</h2>
+        <button id="btn-refresh-posts" class="btn btn-small">Refresh</button>
+      </div>
+      <div id="posts-list" class="list-stack"></div>
+    </section>
+
+    <!-- TAB 3: CHART CATALOG -->
+    <section id="tab-tracks" class="tab-panel">
+      <div class="section-header">
+        <h2>GenX Chart Catalog (1978–1996)</h2>
+      </div>
+      <div class="search-bar">
+        <input type="search" id="track-search" placeholder="Search artist, title, or year..." />
+      </div>
+      <details class="card add-track-details">
+        <summary>+ Add Custom GenX Track</summary>
+        <form id="add-track-form" class="form-stack">
+          <input type="text" id="new-artist" placeholder="Artist (e.g. Blancmange)" required />
+          <input type="text" id="new-title" placeholder="Title (e.g. Blind Vision)" required />
+          <div class="form-row-2">
+            <input type="number" id="new-year" placeholder="Year (1983)" min="1970" max="1999" required />
+            <input type="number" id="new-peak" placeholder="Chart Peak (e.g. 10)" min="1" max="100" />
+          </div>
+          <label class="checkbox-label">
+            <input type="checkbox" id="new-wildcard" /> Mark as Wildcard / Unusual Gem
+          </label>
+          <button type="submit" class="btn btn-primary">Add to Pool</button>
+        </form>
+      </details>
+      <div id="tracks-list" class="list-stack"></div>
+    </section>
+
+    <!-- TAB 4: ADMIN & SCHEDULE -->
+    <section id="tab-admin" class="tab-panel">
+      <h2>Admin &amp; Schedule Settings</h2>
+
+      <form id="settings-form" class="card form-stack">
+        <label class="checkbox-label">
+          <input type="checkbox" id="set-sched-enabled" /> Enable 24/7 Background Scheduler
+        </label>
+
+        <div class="form-row">
+          <label for="set-post-times">Daily Post Times (24h comma-separated)</label>
+          <input type="text" id="set-post-times" placeholder="12:30,19:15" />
+        </div>
+
+        <div class="form-row">
+          <label for="set-jitter">Random Time Jitter (+/- Minutes)</label>
+          <input type="number" id="set-jitter" min="0" max="120" />
+        </div>
+
+        <div class="form-row">
+          <label for="set-wildcard">Wildcard (Top 21–40) Chance: <span id="wildcard-val">25</span>%</label>
+          <input type="range" id="set-wildcard" min="0" max="100" step="5" />
+        </div>
+
+        <div class="form-row">
+          <label for="set-template">Default Video Template</label>
+          <select id="set-template">
+            <option value="vinyl">Spinning Vinyl + Sleeve</option>
+            <option value="cd">3D CD Jewel Case</option>
+            <option value="retro">Retro Audiophile Card</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label for="set-wm-opacity">Seany GenX Watermark Opacity: <span id="wm-val">0.40</span></label>
+          <input type="range" id="set-wm-opacity" min="0.1" max="0.9" step="0.05" />
+        </div>
+
+        <label class="checkbox-label">
+          <input type="checkbox" id="set-auto-publish" /> Auto-Publish Directly (uncheck to save as TikTok Drafts)
+        </label>
+
+        <button type="submit" class="btn btn-primary">Save Schedule &amp; Settings</button>
+      </form>
+
+      <div class="card form-stack" style="margin-top: 16px;">
+        <h3>TikTok Session Cookies</h3>
+        <p class="muted">Paste exported JSON cookies from your browser (must include <code>sessionid</code>) to enable automated posting.</p>
+        <textarea id="cookies-input" rows="4" placeholder='[{"name": "sessionid", "value": "...", "domain": ".tiktok.com"}]'></textarea>
+        <button id="btn-save-cookies" class="btn btn-accent">Save &amp; Validate Cookies</button>
+        <p id="cookie-status-msg" class="muted"></p>
+      </div>
+
+      <div class="card form-stack" style="margin-top: 16px;">
+        <h3>Blacklist</h3>
+        <div id="blacklist-items" class="list-stack"></div>
+      </div>
+    </section>
+  </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-tab="studio">
+      <span class="nav-icon">🎛️</span>
+      <span>Studio</span>
+    </button>
+    <button class="nav-btn" data-tab="posts">
+      <span class="nav-icon">🎬</span>
+      <span>History</span>
+    </button>
+    <button class="nav-btn" data-tab="tracks">
+      <span class="nav-icon">💿</span>
+      <span>Charts</span>
+    </button>
+    <button class="nav-btn" data-tab="admin">
+      <span class="nav-icon">⚙️</span>
+      <span>Admin</span>
+    </button>
+  </nav>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

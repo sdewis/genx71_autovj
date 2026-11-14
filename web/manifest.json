@@ -1,0 +1,18 @@
+{
+  "name": "GenX71 AutoVJ",
+  "short_name": "AutoVJ",
+  "description": "Seany GenX Automated TikTok Music Video Studio & Scheduler",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#090a10",
+  "theme_color": "#090a10",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
