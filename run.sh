@@ -15,11 +15,15 @@ PORT="${PORT:-8710}"
 HOST="${HOST:-0.0.0.0}"
 
 LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "localhost")
+TS_IP=$(tailscale ip -4 2>/dev/null | head -n 1 || true)
 
 echo "=========================================="
 echo "  GenX71 AutoVJ v2.0 Studio & Daemon"
 echo "  Linux Desktop : http://localhost:${PORT}"
-echo "  Samsung S24   : http://${LOCAL_IP}:${PORT}"
+echo "  LAN (Wi-Fi)   : http://${LOCAL_IP}:${PORT}"
+if [ -n "${TS_IP}" ]; then
+  echo "  Tailscale     : http://${TS_IP}:${PORT}"
+fi
 echo "=========================================="
 
 exec uvicorn api.app:app --host "$HOST" --port "$PORT"
