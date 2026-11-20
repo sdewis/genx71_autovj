@@ -13,9 +13,10 @@ All templates feature:
 
 import os
 import math
+import random
 import logging
 import subprocess
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 
@@ -30,6 +31,19 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
+
+# Fact card layout (safely below EQ bars at y=1365 and above TikTok caption UI at y=1560+)
+FACT_CARD_W = 920
+FACT_CARD_H = 148
+FACT_CARD_X = (WIDTH - FACT_CARD_W) // 2
+FACT_CARD_Y = 1395
+
+# Animated watermark lifecycle (seconds)
+WM_SPIN_IN_SEC = 0.8
+WM_HOLD_SEC = 2.5
+WM_FADE_OUT_SEC = 3.0
+WM_PAUSE_SEC = 0.7
+WM_CYCLE_SEC = WM_SPIN_IN_SEC + WM_HOLD_SEC + WM_FADE_OUT_SEC + WM_PAUSE_SEC
 
 
 def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -137,21 +151,32 @@ def _create_cd_jewel_case(artwork_path: str, size: int = 660) -> Image.Image:
     return Image.alpha_composite(case, gloss)
 
 
-def _prepare_watermark(watermark_path: str, opacity: float = 0.40, target_width: int = 190) -> Optional[Image.Image]:
+def _prepare_watermark(watermark_path: str, opacity: float = 1.0, target_width: int = 170) -> Optional[Image.Image]:
     if not os.path.exists(watermark_path):
         return None
     with Image.open(watermark_path) as wm:
         wm = wm.convert("RGBA")
         ratio = target_width / wm.width
-        wm = wm.resize((target_width, int(wm.height * ratio)), Image.Resampling.LANCZOS)
-        # Apply opacity to alpha channel
-        r, g, b, a = wm.split()
-        a = a.point(lambda p: int(p * opacity))
-        wm = Image.merge("RGBA", (r, g, b, a))
+        wm = wm.resize((target_width, max(1, int(wm.height * ratio))), Image.Resampling.LANCZOS)
+        if opacity < 1.0:
+            r, g, b, a = wm.split()
+            a = a.point(lambda p: int(p * opacity))
+            wm = Image.merge("RGBA", (r, g, b, a))
         return wm
 
 
-def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw) -> List[str]:
+def _scale_rgba_alpha(img: Image.Image, alpha_factor: float) -> Image.Image:
+    """Return a copy of an RGBA image with its alpha channel scaled by alpha_factor [0..1]."""
+    if alpha_factor >= 0.999:
+        return img
+    if alpha_factor <= 0.001:
+        return Image.new("RGBA", img.size, (0, 0, 0, 0))
+    r, g, b, a = img.split()
+    a = a.point(lambda p: int(p * alpha_factor))
+    return Image.merge("RGBA", (r, g, b, a))
+
+
+def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw, max_lines: int = 2) -> List[str]:
     words = text.split()
     lines = []
     current = ""
@@ -166,7 +191,206 @@ def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int, draw: Im
             current = w
     if current:
         lines.append(current)
-    return lines[:2]
+    return lines[:max_lines]
+
+
+def compute_fact_schedule(
+    facts: Optional[List[str]],
+    duration: float,
+    start_margin: float = 2.0,
+    end_margin: float = 2.0,
+    fade_sec: float = 0.75,
+    gap_sec: float = 0.30,
+) -> List[Dict[str, Any]]:
+    """
+    Divide [start_margin, duration - end_margin] evenly across up to 3 facts,
+    so fact 1 begins fading in at 2s after start and fact 3 finishes fading out 2s before end.
+    """
+    if not facts:
+        return []
+    clean_facts = [f.strip() for f in facts if isinstance(f, str) and f.strip()][:3]
+    if not clean_facts:
+        return []
+
+    win_start = start_margin
+    win_end = duration - end_margin
+    total_win = win_end - win_start
+    if total_win <= 0.6:
+        return []
+
+    n = len(clean_facts)
+    eff_gap = gap_sec if total_win > (n * 2.0) else 0.0
+    slot_dur = (total_win - eff_gap * (n - 1)) / n
+    eff_fade = min(fade_sec, slot_dur * 0.25)
+
+    schedule: List[Dict[str, Any]] = []
+    for i, text in enumerate(clean_facts):
+        s = win_start + i * (slot_dur + eff_gap)
+        e = s + slot_dur
+        schedule.append({
+            "index": i,
+            "total": n,
+            "text": text,
+            "start": round(s, 3),
+            "end": round(e, 3),
+            "fade": round(eff_fade, 3),
+        })
+    return schedule
+
+
+def _smoothstep(u: float) -> float:
+    u = max(0.0, min(1.0, u))
+    return u * u * (3.0 - 2.0 * u)
+
+
+def get_fact_alpha(slot: Dict[str, Any], t_sec: float) -> float:
+    """Compute smooth fade-in / hold / fade-out alpha [0..1] for a fact slot at time t_sec."""
+    s = slot["start"]
+    e = slot["end"]
+    f = slot["fade"]
+    if t_sec <= s or t_sec >= e:
+        return 0.0
+    if f > 0.0 and t_sec < s + f:
+        return _smoothstep((t_sec - s) / f)
+    if f > 0.0 and t_sec > e - f:
+        return _smoothstep((e - t_sec) / f)
+    return 1.0
+
+
+def _render_fact_card(fact_text: str, index: int, total: int, accent: Tuple[int, int, int]) -> Image.Image:
+    """Pre-render a sleek glassmorphic fact card for compositing below the equalizer."""
+    card = Image.new("RGBA", (FACT_CARD_W, FACT_CARD_H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(card)
+
+    # Glassmorphic dark container with subtle accent outline
+    draw.rounded_rectangle(
+        [0, 0, FACT_CARD_W - 1, FACT_CARD_H - 1],
+        radius=24,
+        fill=(14, 16, 26, 205),
+        outline=(accent[0], accent[1], accent[2], 185),
+        width=2,
+    )
+
+    font_label = _load_font(21, bold=True)
+    font_fact = _load_font(27, bold=False)
+
+    label_text = f"FACT {index + 1}/{total}"
+    draw.text((FACT_CARD_W // 2, 26), label_text, fill=(accent[0], accent[1], accent[2], 245), font=font_label, anchor="mm")
+
+    lines = _wrap_text(fact_text, font_fact, FACT_CARD_W - 64, draw, max_lines=3)
+    line_h = 33
+    block_h = len(lines) * line_h
+    start_y = 48 + max(0, (FACT_CARD_H - 54 - block_h) // 2) + line_h // 2
+    for i, line in enumerate(lines):
+        draw.text((FACT_CARD_W // 2, start_y + i * line_h), line, fill=(248, 248, 255, 250), font=font_fact, anchor="mm")
+
+    return card
+
+
+def _rects_overlap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> bool:
+    return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
+
+
+def generate_watermark_schedule(
+    duration: float,
+    wm_width: int,
+    wm_height: int,
+    rng: Optional[random.Random] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Generate random TikTok-safe watermark placements across the clip.
+    Each placement spins & fades in (0.8s), holds (2.5s), fades out over 3.0s, and pauses (0.7s).
+    Avoids chart badge, fact card, right-side TikTok icons, and bottom caption UI,
+    and enforces a minimum jump distance between consecutive placements.
+    """
+    if duration <= 0.1:
+        return []
+    gen = rng if rng is not None else random.Random()
+
+    # Safe bounding box for the watermark's top-left corner
+    min_x = 60
+    max_x = max(min_x, min(840 - wm_width, WIDTH - wm_width - 180))
+    min_y = 160
+    max_y = max(min_y, FACT_CARD_Y - wm_height - 25)
+
+    # Exclusion zones (chart badge at top center)
+    badge_excl = (150, 165, 930, 265)
+    min_jump_dist = 260.0
+
+    placements: List[Dict[str, Any]] = []
+    prev_center: Optional[Tuple[float, float]] = None
+
+    t_start = 0.2 if duration > 2.0 else 0.0
+    while t_start < duration:
+        best_pos = (min_x, min_y)
+        best_dist = -1.0
+
+        for _ in range(60):
+            x = gen.randint(min_x, max_x)
+            y = gen.randint(min_y, max_y)
+            rect = (x, y, x + wm_width, y + wm_height)
+            if _rects_overlap(rect, badge_excl):
+                continue
+
+            cx = x + wm_width / 2.0
+            cy = y + wm_height / 2.0
+            if prev_center is None:
+                best_pos = (x, y)
+                break
+
+            dist = math.hypot(cx - prev_center[0], cy - prev_center[1])
+            if dist >= min_jump_dist:
+                best_pos = (x, y)
+                break
+            if dist > best_dist:
+                best_dist = dist
+                best_pos = (x, y)
+
+        x, y = best_pos
+        prev_center = (x + wm_width / 2.0, y + wm_height / 2.0)
+        placements.append({
+            "x": x,
+            "y": y,
+            "cx": prev_center[0],
+            "cy": prev_center[1],
+            "start": round(t_start, 3),
+        })
+        t_start += WM_CYCLE_SEC
+
+    return placements
+
+
+def get_watermark_state(
+    placement: Dict[str, Any],
+    t_sec: float,
+    peak_opacity: float = 0.40,
+) -> Optional[Tuple[float, float, float]]:
+    """
+    Return (alpha, angle_deg, scale) for a watermark placement at t_sec, or None if hidden.
+    - Spin-fade IN: 0.8s (360° eased spin, scale 0.6->1.0, alpha 0->peak_opacity)
+    - Hold:         2.5s (upright 0°, scale 1.0, alpha=peak_opacity)
+    - Fade OUT:     3.0s (upright 0°, scale 1.0, alpha peak_opacity->0)
+    - Pause:        0.7s (hidden)
+    """
+    dt = t_sec - placement["start"]
+    if dt < 0.0 or dt >= WM_SPIN_IN_SEC + WM_HOLD_SEC + WM_FADE_OUT_SEC:
+        return None
+
+    if dt < WM_SPIN_IN_SEC:
+        u = dt / WM_SPIN_IN_SEC
+        eased = 1.0 - (1.0 - u) ** 3  # Cubic ease-out
+        alpha = peak_opacity * eased
+        angle = (1.0 - eased) * 360.0
+        scale = 0.6 + 0.4 * eased
+        return (alpha, angle, scale)
+
+    if dt < WM_SPIN_IN_SEC + WM_HOLD_SEC:
+        return (peak_opacity, 0.0, 1.0)
+
+    fade_dt = dt - (WM_SPIN_IN_SEC + WM_HOLD_SEC)
+    u = max(0.0, min(1.0, fade_dt / WM_FADE_OUT_SEC))
+    alpha = peak_opacity * (1.0 - u)
+    return (alpha, 0.0, 1.0)
 
 
 def render_tiktok_video(
@@ -182,25 +406,26 @@ def render_tiktok_video(
     template: str = "vinyl",
     watermark_path: str = DEFAULT_WATERMARK_PATH,
     watermark_opacity: float = 0.40,
+    facts: Optional[List[str]] = None,
 ) -> str:
     """
     Render a sleek 1080x1920 9:16 MP4 video with the selected template,
-    beat-reactive visualizer, chart badge, and Seany GenX safe-zone watermark.
+    beat-reactive visualizer, chart badge, 3 fading track facts,
+    and randomly placed spin-fading Seany GenX watermark.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     palette = extract_palette(artwork_path)
     accent = palette["accent"]
 
-    # Base static canvas (background + header + text + watermark)
+    # Base static canvas (background + header + title/artist)
     base_bg = _create_ambient_background(artwork_path, palette)
     draw_base = ImageDraw.Draw(base_bg)
 
     font_badge = _load_font(30, bold=True)
     font_title = _load_font(56, bold=True)
     font_artist = _load_font(40, bold=False)
-    font_sub = _load_font(26, bold=True)
 
-    # 1. Chart Badge Pill at top safe zone (y=190)
+    # 1. Chart Badge Pill at top safe zone (y=185)
     badge_text = chart_badge.upper()
     b_bbox = draw_base.textbbox((0, 0), badge_text, font=font_badge)
     bw = b_bbox[2] - b_bbox[0] + 64
@@ -220,12 +445,18 @@ def render_tiktok_video(
 
     draw_base.text((WIDTH // 2, ty + 14), artist.upper(), fill=(accent[0], accent[1], accent[2], 255), font=font_artist, anchor="mm")
 
-    # 3. Subtle Seany GenX Watermark in TikTok Safe Zone (upper-left / top-safe or bottom-center above UI)
-    wm = _prepare_watermark(watermark_path, opacity=watermark_opacity, target_width=170)
-    if wm:
-        # Place cleanly at top-left safe margin (x=64, y=130) or bottom-center safe (y=1470)
-        # Bottom-center above TikTok caption box is super clean and hard to crop out without ruining the video
-        base_bg.alpha_composite(wm, ((WIDTH - wm.width) // 2, 1415))
+    # 3. Prepare animated random GenX watermark (full alpha base; scaled per frame)
+    wm_base = _prepare_watermark(watermark_path, opacity=1.0, target_width=170)
+    wm_schedule: List[Dict[str, Any]] = []
+    if wm_base:
+        wm_schedule = generate_watermark_schedule(duration, wm_base.width, wm_base.height)
+
+    # 4. Pre-render 3 fading fact cards timed from 2s after start to 2s before end
+    fact_schedule = compute_fact_schedule(facts, duration)
+    fact_cards = [
+        _render_fact_card(slot["text"], slot["index"], slot["total"], accent)
+        for slot in fact_schedule
+    ]
 
     # Prepare Template-specific pre-rendered assets
     vinyl_disc = None
@@ -289,7 +520,7 @@ def render_tiktok_video(
             energy = rms_envelope[frame_idx] if frame_idx < len(rms_envelope) else 0.3
 
             if template == "vinyl":
-                # Rotate vinyl at ~33.3 RPM (200 deg/sec)
+                # Rotate vinyl at ~33.3 RPM
                 angle = -(t_sec * 160.0) % 360.0
                 rot_disc = vinyl_disc.rotate(angle, resample=Image.Resampling.BILINEAR)
                 # Vinyl peeks out to the right of sleeve
@@ -331,6 +562,36 @@ def render_tiktok_video(
                     radius=6,
                     fill=(accent[0], accent[1], accent[2], 215)
                 )
+
+            # Composite active fading Track Fact card (y=1395..1543)
+            for idx, slot in enumerate(fact_schedule):
+                f_alpha = get_fact_alpha(slot, t_sec)
+                if f_alpha > 0.005:
+                    faded_card = _scale_rgba_alpha(fact_cards[idx], f_alpha)
+                    frame.alpha_composite(faded_card, (FACT_CARD_X, FACT_CARD_Y))
+                    break
+
+            # Composite randomly placed spin-fading GenX Watermark
+            if wm_base and wm_schedule:
+                for placement in wm_schedule:
+                    wm_state = get_watermark_state(placement, t_sec, peak_opacity=watermark_opacity)
+                    if wm_state is None:
+                        continue
+                    wm_alpha, wm_angle, wm_scale = wm_state
+                    if wm_alpha <= 0.005:
+                        break
+                    wm_frame = wm_base
+                    if wm_scale < 0.999:
+                        sw = max(1, int(wm_base.width * wm_scale))
+                        sh = max(1, int(wm_base.height * wm_scale))
+                        wm_frame = wm_frame.resize((sw, sh), Image.Resampling.BILINEAR)
+                    if wm_angle > 0.1:
+                        wm_frame = wm_frame.rotate(wm_angle, resample=Image.Resampling.BILINEAR, expand=True)
+                    wm_frame = _scale_rgba_alpha(wm_frame, wm_alpha)
+                    px = max(0, min(WIDTH - wm_frame.width, int(placement["cx"] - wm_frame.width / 2.0)))
+                    py = max(0, min(HEIGHT - wm_frame.height, int(placement["cy"] - wm_frame.height / 2.0)))
+                    frame.alpha_composite(wm_frame, (px, py))
+                    break
 
             proc.stdin.write(frame.tobytes())
 

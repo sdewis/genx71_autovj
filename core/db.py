@@ -34,6 +34,7 @@ def init_db(db_path: Optional[str] = None) -> None:
             chart_region TEXT DEFAULT 'UK',
             is_wildcard INTEGER DEFAULT 0,
             genre TEXT DEFAULT 'Pop/Rock',
+            facts_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(artist, title)
         );
@@ -76,6 +77,11 @@ def init_db(db_path: Optional[str] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_posts_artist_title ON posts(artist, title);
         """)
 
+        # Safe migration for existing databases missing facts_json
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()}
+        if "facts_json" not in cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN facts_json TEXT")
+
         # Default settings if not already set
         defaults = {
             "schedule_enabled": "true",
@@ -95,14 +101,14 @@ def init_db(db_path: Optional[str] = None) -> None:
 
 def add_track(artist: str, title: str, year: int, chart_peak: Optional[int] = None,
               chart_region: str = "UK", is_wildcard: int = 0, genre: str = "Pop/Rock",
-              db_path: Optional[str] = None) -> Optional[int]:
+              facts_json: Optional[str] = None, db_path: Optional[str] = None) -> Optional[int]:
     conn = get_db(db_path)
     with conn:
         try:
             cur = conn.execute("""
-                INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (artist.strip(), title.strip(), year, chart_peak, chart_region, is_wildcard, genre))
+                INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre, facts_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (artist.strip(), title.strip(), year, chart_peak, chart_region, is_wildcard, genre, facts_json))
             return cur.lastrowid
         except sqlite3.IntegrityError:
             # Already exists
@@ -118,8 +124,8 @@ def add_tracks_batch(tracks_list: List[Dict[str, Any]], db_path: Optional[str] =
         for t in tracks_list:
             try:
                 conn.execute("""
-                    INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre, facts_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     t["artist"].strip(),
                     t["title"].strip(),
@@ -127,12 +133,20 @@ def add_tracks_batch(tracks_list: List[Dict[str, Any]], db_path: Optional[str] =
                     t.get("chart_peak"),
                     t.get("chart_region", "UK"),
                     int(t.get("is_wildcard", 0)),
-                    t.get("genre", "Pop/Rock")
+                    t.get("genre", "Pop/Rock"),
+                    t.get("facts_json")
                 ))
                 inserted += 1
             except sqlite3.IntegrityError:
                 continue
     return inserted
+
+
+def update_track_facts(track_id: int, facts_json: str, db_path: Optional[str] = None) -> bool:
+    conn = get_db(db_path)
+    with conn:
+        cur = conn.execute("UPDATE tracks SET facts_json = ? WHERE id = ?", (facts_json, track_id))
+        return cur.rowcount > 0
 
 
 def get_all_tracks(limit: int = 500, offset: int = 0, db_path: Optional[str] = None) -> List[Dict[str, Any]]:

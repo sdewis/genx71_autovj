@@ -140,19 +140,41 @@ def _load_wav_mono(wav_path: str) -> Tuple[np.ndarray, int]:
         return samples, sr
 
 
-def find_intelligent_clip_window(wav_path: str, target_duration: float = 29.5) -> Tuple[float, float]:
+MIN_CLIP_DURATION = 30.0
+TARGET_CLIP_DURATION = 40.0
+MIN_FULL_TRACK_CLIP = 35.0
+MAX_FULL_TRACK_CLIP = 45.0
+MAX_CLIP_DURATION = 55.0  # Safely below TikTok's 60s automated copyright mute threshold
+
+
+def find_intelligent_clip_window(
+    wav_path: str,
+    target_duration: float = TARGET_CLIP_DURATION,
+    min_duration: Optional[float] = None,
+    max_duration: Optional[float] = None,
+) -> Tuple[float, float]:
     """
-    Analyze audio energy & phrase pauses to find the best ~30s window.
-    - If source is already <= 32s (e.g. Deezer/iTunes 30s preview), snaps start/end to
-      silence/breath gaps near the edges so it doesn't cut mid-beat.
-    - If source is a full track (> 45s), locates the highest-energy chorus/hook region
-      and snaps the start to a phrase onset and the end to a lyric pause/trough.
+    Analyze audio energy & phrase pauses to find the best hook window.
+    - Default target is 40s (clamped 35-45s for full tracks, strictly <58s for TikTok's 60s limit).
+    - If source is already <= target_duration + 1.5s (e.g. a 30s preview fallback),
+      returns the full available duration up to max_duration.
+    - If source is a full track, locates the highest-energy chorus/hook region
+      and snaps start/end to local energy troughs (breath/phrase pauses).
     """
     samples, sr = _load_wav_mono(wav_path)
     total_dur = len(samples) / sr
 
+    eff_min = min_duration if min_duration is not None else (
+        MIN_FULL_TRACK_CLIP if target_duration >= MIN_FULL_TRACK_CLIP else max(1.0, target_duration * 0.8)
+    )
+    eff_max = max_duration if max_duration is not None else (
+        min(MAX_CLIP_DURATION, max(MAX_FULL_TRACK_CLIP, target_duration + 5.0))
+        if target_duration >= MIN_CLIP_DURATION
+        else target_duration + 1.5
+    )
+
     if total_dur <= target_duration + 1.5:
-        return 0.0, min(total_dur, target_duration)
+        return 0.0, round(min(total_dur, eff_max), 2)
 
     # Compute 50ms RMS energy envelope
     hop = int(sr * 0.05)
@@ -162,7 +184,7 @@ def find_intelligent_clip_window(wav_path: str, target_duration: float = 29.5) -
 
     win_hops = int(target_duration / 0.05)
     if win_hops >= len(rms):
-        return 0.0, total_dur
+        return 0.0, round(min(total_dur, eff_max), 2)
 
     # Sliding window sum to find peak energy chorus/verse section
     # Avoid very first 10 seconds (often sparse intro) if track > 90s
@@ -170,7 +192,7 @@ def find_intelligent_clip_window(wav_path: str, target_duration: float = 29.5) -
     end_search_hop = len(rms) - win_hops
 
     if end_search_hop <= start_search_hop:
-        return 0.0, min(total_dur, target_duration)
+        return 0.0, round(min(total_dur, eff_max), 2)
 
     best_idx = start_search_hop
     best_energy = -1.0
@@ -186,14 +208,16 @@ def find_intelligent_clip_window(wav_path: str, target_duration: float = 29.5) -
     s_hi = min(len(rms) - 1, best_idx + snap_range)
     snapped_start_hop = s_lo + int(np.argmin(rms[s_lo:s_hi + 1]))
 
-    # Snap end boundary to a local energy trough (end of lyric line) within +/- 1.5s around target
+    # Snap end boundary to a local energy trough within [eff_min, eff_max]
     nominal_end_hop = min(len(rms) - 1, snapped_start_hop + win_hops)
-    e_lo = max(snapped_start_hop + int(20.0 / 0.05), nominal_end_hop - snap_range)
-    e_hi = min(len(rms) - 1, nominal_end_hop + snap_range)
+    min_end_hop = min(len(rms) - 1, snapped_start_hop + int(eff_min / 0.05))
+    max_end_hop = min(len(rms) - 1, snapped_start_hop + int(eff_max / 0.05))
+    e_lo = max(min_end_hop, nominal_end_hop - snap_range)
+    e_hi = min(max_end_hop, nominal_end_hop + snap_range)
     if e_hi > e_lo:
         snapped_end_hop = e_lo + int(np.argmin(rms[e_lo:e_hi + 1]))
     else:
-        snapped_end_hop = nominal_end_hop
+        snapped_end_hop = min(max_end_hop, max(min_end_hop, nominal_end_hop))
 
     start_sec = round(snapped_start_hop * 0.05, 2)
     end_sec = round(snapped_end_hop * 0.05, 2)
@@ -218,7 +242,8 @@ def extract_rms_envelope(wav_path: str, fps: int = 30) -> List[float]:
 
 def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None) -> Dict[str, object]:
     """
-    Source, clip, and normalize a ~30s audio hook for the given track.
+    Source, clip, and normalize a 35-45s audio hook (strictly >=30s and <58s for TikTok's 60s rule).
+    Prioritizes full-track yt-dlp sourcing; falls back to Deezer/iTunes 30s previews (padded to >=30s if needed).
     Returns dict with: audio_path, source_url, duration, rms_envelope.
     """
     target_dir = cache_dir or CACHE_DIR
@@ -226,20 +251,38 @@ def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None
     slug = _slugify(f"{artist}_{title}")
     final_wav = os.path.join(target_dir, f"{slug}_clip.wav")
 
+    # Reuse cached clip only if it meets the >=30s and <58s duration bounds
     if os.path.exists(final_wav) and os.path.getsize(final_wav) > 50000:
         samples, sr = _load_wav_mono(final_wav)
-        return {
-            "audio_path": final_wav,
-            "source_url": "cached",
-            "duration": round(len(samples) / sr, 2),
-            "rms_envelope": extract_rms_envelope(final_wav, fps=30)
-        }
+        cached_dur = round(len(samples) / sr, 2)
+        if MIN_CLIP_DURATION <= cached_dur <= MAX_CLIP_DURATION + 3.0:
+            return {
+                "audio_path": final_wav,
+                "source_url": "cached",
+                "duration": cached_dur,
+                "rms_envelope": extract_rms_envelope(final_wav, fps=30)
+            }
+        logger.info(f"Cached clip for {artist} - {title} is {cached_dur}s (< {MIN_CLIP_DURATION}s); re-sourcing.")
 
-    source_url = fetch_deezer_preview(artist, title) or fetch_itunes_preview(artist, title)
     raw_download = os.path.join(target_dir, f"{slug}_raw.dat")
     raw_wav = os.path.join(target_dir, f"{slug}_raw.wav")
+    yt_base = os.path.join(target_dir, f"{slug}_yt")
+    yt_out = None
+    source_url = None
 
-    if source_url:
+    # 1. Prioritize yt-dlp full track so we can clip a clean 35-45s hook
+    yt_out = fetch_youtube_audio(artist, title, yt_base)
+    if yt_out:
+        source_url = "youtube_full"
+        subprocess.run([
+            "ffmpeg", "-y", "-i", yt_out,
+            "-ar", "44100", "-ac", "2", raw_wav
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    else:
+        # 2. Fallback to Deezer / iTunes 30s studio previews
+        source_url = fetch_deezer_preview(artist, title) or fetch_itunes_preview(artist, title)
+        if not source_url:
+            raise RuntimeError(f"Could not source audio for {artist} - {title}")
         resp = requests.get(source_url, headers=HEADERS, timeout=20)
         resp.raise_for_status()
         with open(raw_download, "wb") as f:
@@ -248,34 +291,38 @@ def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None
             "ffmpeg", "-y", "-i", raw_download,
             "-ar", "44100", "-ac", "2", raw_wav
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=TARGET_CLIP_DURATION)
+    raw_clip_dur = max(1.0, min(MAX_CLIP_DURATION, end_sec - start_sec))
+    fade_out_start = max(0.0, raw_clip_dur - 1.2)
+
+    # Guarantee final clip duration is strictly >= 30.0s (e.g. pad slightly if a preview is 29.7s)
+    af_filters = [
+        "afade=t=in:st=0:d=0.4",
+        f"afade=t=out:st={fade_out_start:.2f}:d=1.2",
+        "loudnorm=I=-14:TP=-1.5:LRA=11",
+    ]
+    if raw_clip_dur < MIN_CLIP_DURATION:
+        pad_dur = MIN_CLIP_DURATION + 0.5
+        af_filters.append(f"apad=whole_dur={pad_dur:.2f}")
+        out_dur = pad_dur
     else:
-        source_url = "youtube_fallback"
-        yt_out = fetch_youtube_audio(artist, title, os.path.join(target_dir, f"{slug}_yt"))
-        if not yt_out:
-            raise RuntimeError(f"Could not source audio for {artist} - {title}")
-        subprocess.run([
-            "ffmpeg", "-y", "-i", yt_out,
-            "-ar", "44100", "-ac", "2", raw_wav
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out_dur = raw_clip_dur
 
-    start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=29.5)
-    clip_dur = max(5.0, end_sec - start_sec)
-    fade_out_start = max(0.0, clip_dur - 1.2)
-
-    # Clip with loudnorm + smooth fade in/out
     subprocess.run([
         "ffmpeg", "-y",
         "-ss", str(start_sec),
-        "-t", str(clip_dur),
+        "-t", f"{raw_clip_dur:.2f}",
         "-i", raw_wav,
-        "-af", f"afade=t=in:st=0:d=0.4,afade=t=out:st={fade_out_start:.2f}:d=1.2,loudnorm=I=-14:TP=-1.5:LRA=11",
+        "-af", ",".join(af_filters),
+        "-t", f"{out_dur:.2f}",
         "-ar", "44100", "-ac", "2",
         final_wav
     ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     # Cleanup raw temp files
-    for p in (raw_download, raw_wav):
-        if os.path.exists(p):
+    for p in (raw_download, raw_wav, yt_out):
+        if p and os.path.exists(p):
             try:
                 os.remove(p)
             except OSError:

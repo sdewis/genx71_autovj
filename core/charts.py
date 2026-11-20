@@ -112,12 +112,16 @@ GENX_CHART_CATALOG = [
 
 def seed_charts_if_empty(db_path: Optional[str] = None) -> int:
     """Populate the tracks table with the curated GenX catalog if empty."""
+    import json
+    from core.facts import CURATED_TRACK_FACTS
+
     init_db(db_path)
     if count_tracks(db_path) > 0:
         return 0
 
     batch = []
     for artist, title, year, peak, region, is_wildcard, genre in GENX_CHART_CATALOG:
+        curated = CURATED_TRACK_FACTS.get((artist.lower(), title.lower()))
         batch.append({
             "artist": artist,
             "title": title,
@@ -125,7 +129,8 @@ def seed_charts_if_empty(db_path: Optional[str] = None) -> int:
             "chart_peak": peak,
             "chart_region": region,
             "is_wildcard": is_wildcard,
-            "genre": genre
+            "genre": genre,
+            "facts_json": json.dumps(curated) if curated else None
         })
     return add_tracks_batch(batch, db_path=db_path)
 

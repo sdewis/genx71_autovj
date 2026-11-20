@@ -15,6 +15,7 @@ from core.db import (
 from core.charts import select_next_track, format_chart_badge
 from core.artwork import get_single_artwork
 from core.audio import prepare_track_audio
+from core.facts import get_or_fetch_track_facts
 from core.video_renderer import render_tiktok_video, OUTPUT_DIR
 from core.tiktok_poster import upload_to_tiktok, build_caption, check_cookie_health
 
@@ -36,9 +37,9 @@ def generate_post_video(
     """
     Execute the full GenX71 AutoVJ pipeline:
     1. Select non-duplicate GenX track (respecting wildcard % and blacklist)
-    2. Fetch high-res single artwork
-    3. Source & intelligently clip 30s audio hook
-    4. Render 9:16 TikTok MP4 with Seany GenX watermark
+    2. Fetch high-res single artwork & 3 track trivia facts
+    3. Source & intelligently clip 35-45s audio hook (>=30s, <60s TikTok limit)
+    4. Render 9:16 TikTok MP4 with fading facts & animated random GenX watermark
     5. Record in SQLite history
     6. Optionally upload/publish to TikTok via stealth Playwright
     """
@@ -61,10 +62,11 @@ def generate_post_video(
     chosen_template = template or get_setting("default_template", "vinyl", db_path=db_path) or "vinyl"
     wm_opacity = float(get_setting("watermark_opacity", "0.40", db_path=db_path) or "0.40")
 
-    _prog(f"Fetching single artwork for {artist} - {title}...", 25)
+    _prog(f"Fetching artwork & trivia facts for {artist} - {title}...", 25)
     artwork_path = get_single_artwork(artist, title)
+    facts = get_or_fetch_track_facts(track, db_path=db_path)
 
-    _prog("Sourcing & boundary-clipping 30s audio hook...", 45)
+    _prog("Sourcing & boundary-clipping 35-45s audio hook...", 45)
     audio_info = prepare_track_audio(artist, title)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -83,7 +85,8 @@ def generate_post_video(
         duration=audio_info["duration"],
         output_path=output_path,
         template=chosen_template,
-        watermark_opacity=wm_opacity
+        watermark_opacity=wm_opacity,
+        facts=facts
     )
 
     _prog("Saving post record to deduplication DB...", 85)
