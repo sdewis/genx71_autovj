@@ -76,10 +76,12 @@ async function triggerGeneration(opts = {}) {
     await settingsReady.catch(() => {});
   }
   const eraAppropriate = document.getElementById("gen-era-appropriate").checked;
+  const autoQueue = document.getElementById("gen-auto-queue").checked;
   const template = document.getElementById("gen-template").value;
   const payload = {
     template: eraAppropriate ? null : template,
     era_appropriate: eraAppropriate,
+    auto_queue: autoQueue,
     ...opts
   };
 
@@ -116,6 +118,9 @@ function startProgressPolling() {
       refreshStatus();
       if (st.last_post) {
         showPreview(st.last_post);
+        if (st.last_post.status === "scheduled") {
+          loadQueue();
+        }
       } else if (st.error) {
         alert("Generation Error: " + st.error);
       }
@@ -179,6 +184,35 @@ document.getElementById("gen-template").addEventListener("change", (e) => {
   const era = document.getElementById("gen-era-appropriate").checked;
   syncTemplateControls(e.target.value, era);
   persistTemplateControls(e.target.value, era);
+});
+
+function syncAutoQueueControls(autoQueue) {
+  const checked = Boolean(autoQueue);
+  ["gen-auto-queue", "set-auto-queue"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = checked;
+  });
+}
+
+async function persistAutoQueueSetting(autoQueue) {
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        settings: {
+          auto_queue_on_generate: autoQueue ? "true" : "false",
+        }
+      })
+    });
+  } catch (e) {
+    console.error("Failed to save auto-queue setting", e);
+  }
+}
+
+document.getElementById("gen-auto-queue").addEventListener("change", (e) => {
+  syncAutoQueueControls(e.target.checked);
+  persistAutoQueueSetting(e.target.checked);
 });
 
 document.getElementById("btn-gen-random").addEventListener("click", () => triggerGeneration({ force_wildcard: false }));
@@ -578,6 +612,7 @@ async function loadSettings() {
   const defaultTemplate = settings.default_template || "vinyl";
   const eraAppropriate = settings.era_appropriate_template === "true";
   syncTemplateControls(defaultTemplate, eraAppropriate);
+  syncAutoQueueControls(settings.auto_queue_on_generate === "true");
   document.getElementById("set-wm-opacity").value = settings.watermark_opacity || "0.40";
   document.getElementById("wm-val").textContent = settings.watermark_opacity || "0.40";
   document.getElementById("set-auto-publish").checked = settings.auto_publish === "true";
@@ -595,6 +630,11 @@ document.getElementById("set-template").addEventListener("change", (e) => {
   persistTemplateControls(e.target.value, era);
 });
 
+document.getElementById("set-auto-queue").addEventListener("change", (e) => {
+  syncAutoQueueControls(e.target.checked);
+  persistAutoQueueSetting(e.target.checked);
+});
+
 document.getElementById("set-wildcard").addEventListener("input", (e) => {
   document.getElementById("wildcard-val").textContent = e.target.value;
 });
@@ -607,6 +647,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   e.preventDefault();
   const defaultTemplate = document.getElementById("set-template").value;
   const eraAppropriate = document.getElementById("set-era-appropriate").checked;
+  const autoQueue = document.getElementById("set-auto-queue").checked;
   const payload = {
     settings: {
       schedule_enabled: document.getElementById("set-sched-enabled").checked ? "true" : "false",
@@ -615,6 +656,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       wildcard_chance: document.getElementById("set-wildcard").value,
       default_template: defaultTemplate,
       era_appropriate_template: eraAppropriate ? "true" : "false",
+      auto_queue_on_generate: autoQueue ? "true" : "false",
       watermark_opacity: document.getElementById("set-wm-opacity").value,
       auto_publish: document.getElementById("set-auto-publish").checked ? "true" : "false"
     }
@@ -625,6 +667,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
     body: JSON.stringify(payload)
   });
   syncTemplateControls(defaultTemplate, eraAppropriate);
+  syncAutoQueueControls(autoQueue);
   alert("Schedule & settings saved!");
   refreshStatus();
 });

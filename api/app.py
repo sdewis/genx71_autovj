@@ -93,6 +93,7 @@ class GenerateRequest(BaseModel):
     era_appropriate: Optional[bool] = None
     force_wildcard: Optional[bool] = None
     publish: bool = False
+    auto_queue: Optional[bool] = None
 
 
 class TrackCreateRequest(BaseModel):
@@ -180,6 +181,7 @@ def api_generate(req: GenerateRequest):
                 era_appropriate=req.era_appropriate,
                 force_wildcard=req.force_wildcard,
                 publish=req.publish,
+                auto_queue=req.auto_queue,
                 progress_cb=_cb
             )
             gen_state["last_post"] = post

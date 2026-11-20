@@ -9,7 +9,7 @@
   <title>GenX71 AutoVJ Studio</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/logo.png" type="image/png" />
-  <link rel="stylesheet" href="/static/style.css?v=2.6" />
+  <link rel="stylesheet" href="/static/style.css?v=2.8" />
 </head>
 <body>
   <header class="topbar">
@@ -60,6 +60,10 @@
           <label class="checkbox-label" style="margin-top: 6px;">
             <input type="checkbox" id="gen-era-appropriate" />
             <span>Era Appropriate <span class="muted">(Vinyl/Audiophile pre-1988, CD 1988+)</span></span>
+          </label>
+          <label class="checkbox-label" style="margin-top: 4px;">
+            <input type="checkbox" id="gen-auto-queue" />
+            <span>Auto-queue on generate <span class="muted">(automatically add rendered tracks to Queue)</span></span>
           </label>
         </div>
 
@@ -204,6 +208,10 @@
         </div>
 
         <label class="checkbox-label">
+          <input type="checkbox" id="set-auto-queue" /> Auto-queue on generate (add rendered tracks to scheduled Queue)
+        </label>
+
+        <label class="checkbox-label">
           <input type="checkbox" id="set-auto-publish" /> Auto-Publish Directly (uncheck to save as TikTok Drafts)
         </label>
 
@@ -261,6 +269,6 @@
     </button>
   </nav>
 
-  <script src="/static/app.js?v=2.6"></script>
+  <script src="/static/app.js?v=2.8"></script>
 </body>
 </html>

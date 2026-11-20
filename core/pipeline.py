@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Callable
 
 from core.db import (
-    init_db, get_setting, record_post, update_post_status, get_post_by_id
+    init_db, get_setting, record_post, update_post_status, get_post_by_id, queue_post
 )
 from core.charts import select_next_track, format_chart_badge
 from core.artwork import get_single_artwork
@@ -55,6 +55,7 @@ def generate_post_video(
     era_appropriate: Optional[bool] = None,
     force_wildcard: Optional[bool] = None,
     publish: bool = False,
+    auto_queue: Optional[bool] = None,
     progress_cb: Optional[Callable[[str, int], None]] = None,
     db_path: Optional[str] = None
 ) -> Dict[str, Any]:
@@ -158,6 +159,15 @@ def generate_post_video(
                 update_post_status(post_id, "failed", error_message=str(e), db_path=db_path)
                 _prog(f"Upload failed (video saved): {e}", 100)
     else:
-        _prog("Video rendered and ready for preview!", 100)
+        should_queue = (
+            auto_queue
+            if auto_queue is not None
+            else get_setting("auto_queue_on_generate", "false", db_path=db_path) == "true"
+        )
+        if should_queue:
+            pos = queue_post(post_id, db_path=db_path)
+            _prog(f"Video rendered and queued (#{pos}) for next scheduled post!", 100)
+        else:
+            _prog("Video rendered and ready for preview!", 100)
 
     return get_post_by_id(post_id, db_path=db_path)
