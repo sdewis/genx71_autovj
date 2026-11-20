@@ -15,13 +15,31 @@ from typing import Dict, Any, List, Optional
 from playwright.sync_api import sync_playwright
 
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth as _PlaywrightStealth
 except ImportError:
-    stealth_sync = None
+    _PlaywrightStealth = None
+
+try:
+    from playwright_stealth import stealth_sync as _legacy_stealth_sync
+except ImportError:
+    _legacy_stealth_sync = None
 
 from core.db import get_setting, set_setting
 
 logger = logging.getLogger(__name__)
+_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
+
+
+def _apply_stealth(page: Any) -> bool:
+    """Apply playwright-stealth evasions (supports both v2 Stealth and v1 stealth_sync)."""
+    if _PlaywrightStealth is not None:
+        _PlaywrightStealth().apply_stealth_sync(page)
+        return True
+    if _legacy_stealth_sync is not None:
+        _legacy_stealth_sync(page)
+        return True
+    logger.warning("playwright-stealth not available; continuing without stealth evasions.")
+    return False
 
 MAX_COOKIE_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
 MAX_RAW_COOKIE_ITEMS = 5000
@@ -186,14 +204,19 @@ def parse_cookies_json_secure(raw_json: str) -> List[Dict[str, Any]]:
                 f"Too many TikTok cookies (exceeds maximum of {MAX_COOKIE_COUNT})."
             )
 
+        secure = bool(item.get("secure", True))
+        same_site = _normalize_same_site(item.get("sameSite", ""))
+        if same_site == "None" and not secure:
+            same_site = "Lax"
+
         cookie: Dict[str, Any] = {
             "name": name,
             "value": value,
             "domain": domain,
             "path": path,
-            "secure": bool(item.get("secure", True)),
+            "secure": secure,
             "httpOnly": bool(item.get("httpOnly", False)),
-            "sameSite": _normalize_same_site(item.get("sameSite", "")),
+            "sameSite": same_site,
         }
 
         exp = _parse_expires(item)
@@ -295,6 +318,193 @@ def build_caption(artist: str, title: str, year: int, chart_info: str) -> str:
     )
 
 
+_MODAL_SELECTOR = '[role="dialog"], .TUXModal'
+_OVERLAY_SELECTOR = '.TUXModal-overlay[data-transition-status="open"]'
+_UNSAFE_BUTTON_WORDS = ("discard", "delete", "remove", "leave", "exit", "log out", "logout")
+_SAFE_DISMISS_LABELS = (
+    "not now",
+    "got it",
+    "skip",
+    "maybe later",
+    "no thanks",
+    "close",
+    "ok",
+    "cancel",
+    "turn on",
+    "allow",
+    "accept",
+    "continue",
+)
+
+
+def _is_unsafe_button_label(text: str) -> bool:
+    lower = text.strip().lower()
+    return any(word in lower for word in _UNSAFE_BUTTON_WORDS)
+
+
+def _dismiss_modals(page: Any, max_rounds: int = 5) -> int:
+    """
+    Detect and dismiss blocking TikTok Studio modals/overlays (e.g. TUXModal
+    prompts like 'Turn on automatic content checks?' or feature callouts)
+    without clicking destructive buttons like 'Discard' or 'Delete'.
+    """
+    dismissed = 0
+    for _ in range(max_rounds):
+        dialogs = page.locator(_MODAL_SELECTOR)
+        visible_dialog = None
+        try:
+            count = dialogs.count()
+        except Exception:
+            count = 0
+
+        for idx in range(count - 1, -1, -1):
+            candidate = dialogs.nth(idx)
+            try:
+                if candidate.is_visible():
+                    visible_dialog = candidate
+                    break
+            except Exception:
+                continue
+
+        overlay_visible = False
+        try:
+            overlay = page.locator(_OVERLAY_SELECTOR).first
+            overlay_visible = overlay.count() > 0 and overlay.is_visible()
+        except Exception:
+            overlay_visible = False
+
+        if visible_dialog is None and not overlay_visible:
+            break
+
+        clicked = False
+        if visible_dialog is not None:
+            try:
+                snippet = " ".join(visible_dialog.inner_text(timeout=1500).split())[:220]
+                logger.info("TikTok Studio modal detected: %s", snippet)
+            except Exception:
+                logger.info("TikTok Studio modal detected (unable to read text).")
+
+            buttons = visible_dialog.locator('button, [role="button"]')
+            try:
+                btn_count = buttons.count()
+            except Exception:
+                btn_count = 0
+
+            candidates: List[tuple] = []
+            for b_idx in range(btn_count):
+                btn = buttons.nth(b_idx)
+                try:
+                    if not btn.is_visible():
+                        continue
+                    label = (btn.inner_text(timeout=1000) or "").strip()
+                    aria = (btn.get_attribute("aria-label") or "").strip()
+                    cls = (btn.get_attribute("class") or "").strip()
+                except Exception:
+                    continue
+                combined = f"{label} {aria}".strip()
+                if _is_unsafe_button_label(combined):
+                    continue
+                candidates.append((btn, label.lower(), aria.lower(), cls.lower()))
+
+            # Prefer known safe dismiss labels in priority order
+            chosen_btn = None
+            for target in _SAFE_DISMISS_LABELS:
+                for btn, label, aria, _cls in candidates:
+                    if label == target or aria == target or target in label or target in aria:
+                        chosen_btn = btn
+                        break
+                if chosen_btn is not None:
+                    break
+
+            # Fallback to an explicit close icon button inside the modal
+            if chosen_btn is None:
+                for btn, _label, aria, cls in candidates:
+                    if "close" in aria or "close" in cls:
+                        chosen_btn = btn
+                        break
+
+            if chosen_btn is not None:
+                try:
+                    chosen_btn.click(timeout=3000)
+                    clicked = True
+                    dismissed += 1
+                    _human_sleep(0.6, 1.2)
+                    continue
+                except Exception as exc:
+                    logger.debug("Modal button click failed: %s", exc)
+
+        # Fallback: press Escape to close modal/overlay
+        try:
+            page.keyboard.press("Escape")
+            dismissed += 1
+            _human_sleep(0.6, 1.0)
+        except Exception:
+            break
+
+        if not clicked:
+            # Avoid looping repeatedly if Escape didn't dismiss the overlay
+            try:
+                still_open = (
+                    (visible_dialog is not None and visible_dialog.is_visible())
+                    or (page.locator(_OVERLAY_SELECTOR).count() > 0 and page.locator(_OVERLAY_SELECTOR).first.is_visible())
+                )
+            except Exception:
+                still_open = False
+            if still_open:
+                break
+
+    return dismissed
+
+
+def _confirm_action_modal(page: Any, accept_labels: tuple) -> bool:
+    """If a confirmation modal appears after clicking Post/Draft, click the matching confirm button."""
+    dialogs = page.locator(_MODAL_SELECTOR)
+    try:
+        count = dialogs.count()
+    except Exception:
+        return False
+
+    for idx in range(count - 1, -1, -1):
+        dialog = dialogs.nth(idx)
+        try:
+            if not dialog.is_visible():
+                continue
+            buttons = dialog.locator('button, [role="button"]')
+            btn_count = buttons.count()
+        except Exception:
+            continue
+
+        for target in accept_labels:
+            for b_idx in range(btn_count):
+                btn = buttons.nth(b_idx)
+                try:
+                    if not btn.is_visible():
+                        continue
+                    label = (btn.inner_text(timeout=1000) or "").strip().lower()
+                except Exception:
+                    continue
+                if _is_unsafe_button_label(label):
+                    continue
+                if label == target or target in label:
+                    btn.click(timeout=5000)
+                    _human_sleep(1.5, 2.5)
+                    return True
+    return False
+
+
+def _save_error_screenshot(page: Any) -> Optional[str]:
+    """Save a diagnostic screenshot to output/tiktok_last_error.png on upload failure."""
+    try:
+        os.makedirs(_OUTPUT_DIR, exist_ok=True)
+        path = os.path.join(_OUTPUT_DIR, "tiktok_last_error.png")
+        page.screenshot(path=path, full_page=False)
+        logger.info("Saved TikTok upload error screenshot to %s", path)
+        return path
+    except Exception as exc:
+        logger.debug("Could not save error screenshot: %s", exc)
+        return None
+
+
 def upload_to_tiktok(
     video_path: str,
     caption: str,
@@ -333,8 +543,7 @@ def upload_to_tiktok(
         )
         context.add_cookies(cookies)
         page = context.new_page()
-        if stealth_sync:
-            stealth_sync(page)
+        _apply_stealth(page)
 
         try:
             logger.info("Navigating to TikTok Studio upload page...")
@@ -344,16 +553,28 @@ def upload_to_tiktok(
             if "login" in page.url.lower():
                 raise RuntimeError("TikTok session expired or invalid (redirected to login).")
 
+            _dismiss_modals(page)
+
             # Locate file input
             file_input = page.locator('input[type="file"]').first
             file_input.set_input_files(video_path, timeout=30000)
             logger.info("Video file attached, waiting for upload & processing...")
             _human_sleep(5.0, 8.0)
 
+            # Dismiss any post-upload TikTok Studio modals (e.g. automatic content check prompt)
+            _dismiss_modals(page)
+
             # Wait for caption editor
             caption_box = page.locator('[contenteditable="true"]').first
             caption_box.wait_for(state="visible", timeout=60000)
-            caption_box.click()
+            _dismiss_modals(page)
+
+            try:
+                caption_box.click(timeout=15000)
+            except Exception:
+                # One retry in case a modal appeared right before the click
+                _dismiss_modals(page)
+                caption_box.click(timeout=15000)
             _human_sleep(0.6, 1.4)
 
             # Clear existing filename text and type caption with human cadence
@@ -363,22 +584,45 @@ def upload_to_tiktok(
             page.keyboard.type(caption, delay=random.randint(25, 55))
             _human_sleep(2.0, 3.5)
 
+            _dismiss_modals(page)
+
             if auto_publish:
-                post_btn = page.locator('button:has-text("Post")').last
-                post_btn.wait_for(state="visible", timeout=30000)
-                post_btn.click()
-                _human_sleep(4.0, 7.0)
+                post_btn = page.locator('button[data-e2e="post_video_button"]').first
+                if post_btn.count() == 0:
+                    post_btn = page.locator('button:has-text("Post")').last
+                post_btn.wait_for(state="visible", timeout=60000)
+                # Wait briefly if button is disabled while video finishes processing
+                deadline = time.time() + 60
+                while time.time() < deadline:
+                    try:
+                        if post_btn.is_enabled():
+                            break
+                    except Exception:
+                        break
+                    time.sleep(1.0)
+                post_btn.click(timeout=15000)
+                _human_sleep(2.0, 3.5)
+                _confirm_action_modal(page, ("post now", "continue to post", "post"))
+                _human_sleep(3.0, 5.0)
                 status = "posted"
                 msg = "Published to TikTok."
             else:
                 # Save as draft if button exists, otherwise leave uploaded
-                draft_btn = page.locator('button:has-text("Save draft"), button:has-text("Draft")').first
+                draft_btn = page.locator('button[data-e2e="save_draft_button"]').first
+                if draft_btn.count() == 0:
+                    draft_btn = page.locator('button:has-text("Save draft"), button:has-text("Draft")').first
                 if draft_btn.count() > 0 and draft_btn.is_visible():
-                    draft_btn.click()
-                    _human_sleep(2.5, 4.0)
+                    draft_btn.click(timeout=15000)
+                    _human_sleep(1.5, 2.5)
+                    _confirm_action_modal(page, ("save draft", "save", "confirm"))
+                    _human_sleep(2.0, 3.5)
                 status = "draft"
                 msg = "Uploaded to TikTok Drafts."
 
             return {"status": status, "message": msg}
+        except Exception:
+            logger.error("TikTok upload failed at URL: %s", page.url)
+            _save_error_screenshot(page)
+            raise
         finally:
             browser.close()

@@ -176,3 +176,121 @@ def test_api_cookies_import_endpoint():
 
         # Clean up test cookie
         client.post("/api/cookies", json={"cookies_json": ""})
+
+
+def test_parse_insecure_samesite_none_normalized_to_lax():
+    raw = json.dumps([
+        {
+            "name": "ttwid",
+            "value": "abc123",
+            "domain": ".tiktok.com",
+            "secure": False,
+            "sameSite": "unspecified",
+        }
+    ])
+    cookies = parse_cookies_json_secure(raw)
+    assert len(cookies) == 1
+    assert cookies[0]["secure"] is False
+    assert cookies[0]["sameSite"] == "Lax"
+
+
+def test_dismiss_modals_clicks_safe_button_and_avoids_discard():
+    from core.tiktok_poster import _dismiss_modals
+
+    clicked = []
+
+    class FakeButton:
+        def __init__(self, text, aria="", cls="", visible=True):
+            self._text = text
+            self._aria = aria
+            self._cls = cls
+            self._visible = visible
+
+        def is_visible(self):
+            return self._visible
+
+        def inner_text(self, timeout=None):
+            return self._text
+
+        def get_attribute(self, name):
+            if name == "aria-label":
+                return self._aria
+            if name == "class":
+                return self._cls
+            return None
+
+        def click(self, timeout=None):
+            clicked.append(self._text or self._aria)
+            dialog._visible = False
+
+    class FakeLocator:
+        def __init__(self, items):
+            self._items = items
+
+        def count(self):
+            return len(self._items)
+
+        def nth(self, idx):
+            return self._items[idx]
+
+        @property
+        def first(self):
+            return self._items[0] if self._items else FakeButton("", visible=False)
+
+    class FakeDialog:
+        def __init__(self, text, buttons):
+            self._text = text
+            self._buttons = buttons
+            self._visible = True
+
+        def is_visible(self):
+            return self._visible
+
+        def inner_text(self, timeout=None):
+            return self._text
+
+        def locator(self, selector):
+            return FakeLocator(self._buttons)
+
+    dialog = FakeDialog(
+        "Turn on automatic content checks?",
+        [FakeButton("Discard"), FakeButton("Not now")],
+    )
+
+    class FakeKeyboard:
+        def press(self, key):
+            clicked.append(f"key:{key}")
+
+    class FakePage:
+        keyboard = FakeKeyboard()
+
+        def locator(self, selector):
+            if "dialog" in selector:
+                return FakeLocator([dialog])
+            return FakeLocator([])
+
+    dismissed = _dismiss_modals(FakePage(), max_rounds=3)
+    assert dismissed == 1
+    assert clicked == ["Not now"]
+
+
+def test_apply_stealth_supports_v2_and_v1(monkeypatch):
+    import core.tiktok_poster as tp
+
+    calls = []
+
+    class FakeStealthV2:
+        def apply_stealth_sync(self, page):
+            calls.append(("v2", page))
+
+    monkeypatch.setattr(tp, "_PlaywrightStealth", FakeStealthV2)
+    monkeypatch.setattr(tp, "_legacy_stealth_sync", None)
+    assert tp._apply_stealth("page1") is True
+    assert calls == [("v2", "page1")]
+
+    calls.clear()
+    monkeypatch.setattr(tp, "_PlaywrightStealth", None)
+    monkeypatch.setattr(tp, "_legacy_stealth_sync", lambda p: calls.append(("v1", p)))
+    assert tp._apply_stealth("page2") is True
+    assert calls == [("v1", "page2")]
+
