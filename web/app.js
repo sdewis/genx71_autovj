@@ -7,6 +7,7 @@ if ("serviceWorker" in navigator) {
 let currentPreviewPostId = null;
 let pollTimer = null;
 let publishPollTimer = null;
+let settingsReady = null;
 
 // --- Navigation ---
 document.querySelectorAll(".nav-btn").forEach((btn) => {
@@ -61,6 +62,9 @@ async function refreshStatus() {
 }
 
 async function triggerGeneration(opts = {}) {
+  if (settingsReady) {
+    await settingsReady.catch(() => {});
+  }
   const eraAppropriate = document.getElementById("gen-era-appropriate").checked;
   const template = document.getElementById("gen-template").value;
   const payload = {
@@ -122,8 +126,49 @@ function showPreview(post) {
   document.getElementById("btn-download-preview").href = videoUrl;
 }
 
+function syncTemplateControls(template, eraAppropriate) {
+  const tpl = template || "vinyl";
+  const era = Boolean(eraAppropriate);
+  ["gen-template", "set-template"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) {
+      el.value = tpl;
+      el.disabled = era;
+    }
+  });
+  ["gen-era-appropriate", "set-era-appropriate"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = era;
+  });
+}
+
+async function persistTemplateControls(template, eraAppropriate) {
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        settings: {
+          default_template: template || "vinyl",
+          era_appropriate_template: eraAppropriate ? "true" : "false",
+        }
+      })
+    });
+  } catch (e) {
+    console.error("Failed to save template settings", e);
+  }
+}
+
 document.getElementById("gen-era-appropriate").addEventListener("change", (e) => {
-  document.getElementById("gen-template").disabled = e.target.checked;
+  const tpl = document.getElementById("gen-template").value;
+  syncTemplateControls(tpl, e.target.checked);
+  persistTemplateControls(tpl, e.target.checked);
+});
+
+document.getElementById("gen-template").addEventListener("change", (e) => {
+  const era = document.getElementById("gen-era-appropriate").checked;
+  syncTemplateControls(e.target.value, era);
+  persistTemplateControls(e.target.value, era);
 });
 
 document.getElementById("btn-gen-random").addEventListener("click", () => triggerGeneration({ force_wildcard: false }));
@@ -324,17 +369,24 @@ async function loadSettings() {
   document.getElementById("set-jitter").value = settings.jitter_minutes || "30";
   document.getElementById("set-wildcard").value = settings.wildcard_chance || "25";
   document.getElementById("wildcard-val").textContent = settings.wildcard_chance || "25";
-  document.getElementById("set-template").value = settings.default_template || "vinyl";
+  const defaultTemplate = settings.default_template || "vinyl";
   const eraAppropriate = settings.era_appropriate_template === "true";
-  document.getElementById("set-era-appropriate").checked = eraAppropriate;
-  document.getElementById("set-template").disabled = eraAppropriate;
+  syncTemplateControls(defaultTemplate, eraAppropriate);
   document.getElementById("set-wm-opacity").value = settings.watermark_opacity || "0.40";
   document.getElementById("wm-val").textContent = settings.watermark_opacity || "0.40";
   document.getElementById("set-auto-publish").checked = settings.auto_publish === "true";
 }
 
 document.getElementById("set-era-appropriate").addEventListener("change", (e) => {
-  document.getElementById("set-template").disabled = e.target.checked;
+  const tpl = document.getElementById("set-template").value;
+  syncTemplateControls(tpl, e.target.checked);
+  persistTemplateControls(tpl, e.target.checked);
+});
+
+document.getElementById("set-template").addEventListener("change", (e) => {
+  const era = document.getElementById("set-era-appropriate").checked;
+  syncTemplateControls(e.target.value, era);
+  persistTemplateControls(e.target.value, era);
 });
 
 document.getElementById("set-wildcard").addEventListener("input", (e) => {
@@ -347,14 +399,16 @@ document.getElementById("set-wm-opacity").addEventListener("input", (e) => {
 
 document.getElementById("settings-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const defaultTemplate = document.getElementById("set-template").value;
+  const eraAppropriate = document.getElementById("set-era-appropriate").checked;
   const payload = {
     settings: {
       schedule_enabled: document.getElementById("set-sched-enabled").checked ? "true" : "false",
       daily_post_times: document.getElementById("set-post-times").value,
       jitter_minutes: document.getElementById("set-jitter").value,
       wildcard_chance: document.getElementById("set-wildcard").value,
-      default_template: document.getElementById("set-template").value,
-      era_appropriate_template: document.getElementById("set-era-appropriate").checked ? "true" : "false",
+      default_template: defaultTemplate,
+      era_appropriate_template: eraAppropriate ? "true" : "false",
       watermark_opacity: document.getElementById("set-wm-opacity").value,
       auto_publish: document.getElementById("set-auto-publish").checked ? "true" : "false"
     }
@@ -364,6 +418,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+  syncTemplateControls(defaultTemplate, eraAppropriate);
   alert("Schedule & settings saved!");
   refreshStatus();
 });
@@ -518,5 +573,6 @@ window.unblock = async (id) => {
 };
 
 // Initial load
+settingsReady = loadSettings();
 refreshStatus();
 setInterval(refreshStatus, 15000);
