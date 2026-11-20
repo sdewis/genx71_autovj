@@ -9,7 +9,7 @@
   <title>GenX71 AutoVJ Studio</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/logo.png" type="image/png" />
-  <link rel="stylesheet" href="/static/style.css?v=2.5" />
+  <link rel="stylesheet" href="/static/style.css?v=2.6" />
 </head>
 <body>
   <header class="topbar">
@@ -84,8 +84,9 @@
         <div class="video-wrapper">
           <video id="preview-video" controls playsinline></video>
         </div>
-        <div class="btn-group" style="margin-top: 12px;">
+        <div class="btn-group-3" style="margin-top: 12px;">
           <button id="btn-publish-preview" class="btn btn-primary">Send to TikTok</button>
+          <button id="btn-queue-preview" class="btn btn-accent">Queue for Next Post</button>
           <a id="btn-download-preview" class="btn btn-secondary" download>Download MP4</a>
         </div>
         <div id="publish-preview-progress-box" class="progress-box hidden">
@@ -97,7 +98,29 @@
       </div>
     </section>
 
-    <!-- TAB 2: POST HISTORY -->
+    <!-- TAB 2: SCHEDULED QUEUE -->
+    <section id="tab-queue" class="tab-panel">
+      <div class="section-header">
+        <h2>Scheduled Post Queue</h2>
+        <div class="section-actions">
+          <button id="btn-clear-queue" class="btn btn-small btn-danger-outline hidden">Clear All</button>
+          <button id="btn-refresh-queue" class="btn btn-small">Refresh</button>
+        </div>
+      </div>
+      <div class="card queue-summary">
+        <span class="muted">Next scheduled slot: <strong id="queue-next-run" style="color: var(--cyan);">--</strong></span>
+        <span class="muted">Drag cards or use ⬆️ / ⬇️ to reorder</span>
+      </div>
+      <div id="publish-queue-progress-box" class="card progress-box hidden" style="margin-top: 0;">
+        <div class="progress-bar-bg">
+          <div id="publish-queue-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+        </div>
+        <p id="publish-queue-progress-msg" class="progress-msg">Starting TikTok upload...</p>
+      </div>
+      <div id="queue-list" class="list-stack"></div>
+    </section>
+
+    <!-- TAB 3: POST HISTORY -->
     <section id="tab-posts" class="tab-panel">
       <div class="section-header">
         <h2>Post History &amp; Deduplication</h2>

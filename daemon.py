@@ -4,6 +4,7 @@ Reads schedule configuration from SQLite, injects randomized Gaussian time jitte
 to prevent bot-detection patterns, and executes the full generation & posting pipeline.
 """
 
+import os
 import time
 import random
 import signal
@@ -13,9 +14,10 @@ from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 
-from core.db import init_db, get_setting
+from core.db import init_db, get_setting, pop_next_queued_post, update_post_status
 from core.charts import seed_charts_if_empty
 from core.pipeline import generate_post_video
+from core.tiktok_poster import check_cookie_health, upload_to_tiktok, build_caption
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,8 +71,37 @@ class AutoVJDaemon:
     def _run_scheduled_job(self):
         logger.info("Triggered scheduled GenX71 AutoVJ generation & post job.")
         try:
-            post = generate_post_video(publish=True, db_path=self.db_path)
-            logger.info(f"Scheduled job finished: {post['artist']} - {post['title']} (status={post['status']})")
+            queued = pop_next_queued_post(db_path=self.db_path)
+            while queued and (not queued.get("video_path") or not os.path.exists(queued["video_path"])):
+                logger.warning("Queued post #%s video missing on disk; marking failed and checking next.", queued["id"])
+                update_post_status(queued["id"], "failed", error_message="Video file missing on disk.", db_path=self.db_path)
+                queued = pop_next_queued_post(db_path=self.db_path)
+
+            if queued:
+                logger.info("Publishing queued post #%s: %s - %s", queued["id"], queued["artist"], queued["title"])
+                health = check_cookie_health(db_path=self.db_path)
+                if not health["healthy"]:
+                    logger.warning("Skipped queued post #%s: %s", queued["id"], health["reason"])
+                else:
+                    auto_pub = get_setting("auto_publish", "false", db_path=self.db_path) == "true"
+                    caption = build_caption(
+                        queued["artist"], queued["title"], queued["year"], queued.get("chart_info", "")
+                    )
+                    try:
+                        res = upload_to_tiktok(
+                            queued["video_path"], caption, auto_publish=auto_pub, db_path=self.db_path
+                        )
+                        update_post_status(queued["id"], res["status"], db_path=self.db_path)
+                        logger.info(
+                            "Scheduled queued post #%s finished: %s - %s (status=%s)",
+                            queued["id"], queued["artist"], queued["title"], res["status"]
+                        )
+                    except Exception as exc:
+                        logger.error("Scheduled queued post #%s upload failed: %s", queued["id"], exc)
+                        update_post_status(queued["id"], "failed", error_message=str(exc), db_path=self.db_path)
+            else:
+                post = generate_post_video(publish=True, db_path=self.db_path)
+                logger.info(f"Scheduled job finished: {post['artist']} - {post['title']} (status={post['status']})")
         except Exception as e:
             logger.error(f"Scheduled job failed: {e}")
         finally:

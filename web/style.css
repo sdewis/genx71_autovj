@@ -347,8 +347,76 @@ select:disabled {
 .badge-wildcard { color: var(--magenta); border: 1px solid rgba(255, 46, 147, 0.35); }
 .badge-posted { color: var(--green); border: 1px solid rgba(0, 230, 118, 0.35); }
 .badge-failed { color: var(--danger); border: 1px solid rgba(255, 71, 87, 0.35); }
+.badge-queued { color: var(--cyan); border: 1px solid rgba(0, 229, 255, 0.45); background: rgba(0, 229, 255, 0.1); }
 
 .muted { font-size: 0.82rem; color: var(--muted); }
+
+.btn-group-3 {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+@media (min-width: 580px) {
+  .btn-group-3 { grid-template-columns: 1fr 1fr 1fr; }
+}
+
+.section-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.queue-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.queue-card {
+  cursor: grab;
+  transition: border-color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+.queue-card.dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
+.queue-card.drag-over {
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.45);
+}
+
+.queue-pos {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 9px;
+  font-weight: 800;
+  font-size: 0.82rem;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.queue-pos.next-up {
+  color: var(--cyan);
+  border-color: rgba(0, 229, 255, 0.5);
+  background: rgba(0, 229, 255, 0.12);
+}
+
+.btn-danger-outline {
+  color: var(--danger);
+  border-color: rgba(255, 71, 87, 0.4);
+}
 
 .bottom-nav {
   position: fixed;
@@ -361,11 +429,12 @@ select:disabled {
   backdrop-filter: blur(18px);
   border-top: 1px solid var(--border);
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   z-index: 30;
 }
 
 .nav-btn {
+  position: relative;
   background: none;
   border: none;
   color: var(--muted);
@@ -384,6 +453,23 @@ select:disabled {
 }
 
 .nav-icon { font-size: 1.25rem; }
+
+.nav-badge {
+  position: absolute;
+  top: 6px;
+  right: calc(50% - 22px);
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--magenta);
+  color: #fff;
+  font-size: 0.65rem;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
 
 /* Cookie File Browser Dropzone */
 .sr-only {

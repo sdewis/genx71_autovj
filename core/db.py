@@ -82,6 +82,11 @@ def init_db(db_path: Optional[str] = None) -> None:
         if "facts_json" not in cols:
             conn.execute("ALTER TABLE tracks ADD COLUMN facts_json TEXT")
 
+        # Safe migration for existing databases missing queue_position on posts
+        post_cols = {row["name"] for row in conn.execute("PRAGMA table_info(posts)").fetchall()}
+        if "queue_position" not in post_cols:
+            conn.execute("ALTER TABLE posts ADD COLUMN queue_position INTEGER")
+
         # Default settings if not already set
         defaults = {
             "schedule_enabled": "true",
@@ -260,18 +265,151 @@ def record_post(track_id: Optional[int], artist: str, title: str, year: int,
         return cur.lastrowid
 
 
+def _compact_queue_positions(conn: sqlite3.Connection) -> None:
+    rows = conn.execute("""
+        SELECT id FROM posts
+        WHERE status = 'scheduled'
+        ORDER BY COALESCE(queue_position, 999999) ASC, id ASC
+    """).fetchall()
+    for idx, row in enumerate(rows, start=1):
+        conn.execute("UPDATE posts SET queue_position = ? WHERE id = ?", (idx, row["id"]))
+
+
 def update_post_status(post_id: int, status: str, tiktok_id: Optional[str] = None,
                        error_message: Optional[str] = None, db_path: Optional[str] = None) -> bool:
     conn = get_db(db_path)
     with conn:
         posted_at = datetime.utcnow().isoformat() if status == "posted" else None
-        cur = conn.execute("""
-            UPDATE posts 
-            SET status = ?, tiktok_id = COALESCE(?, tiktok_id),
-                error_message = ?, posted_at = COALESCE(?, posted_at)
-            WHERE id = ?
-        """, (status, tiktok_id, error_message, posted_at, post_id))
+        clear_queue_pos = status != "scheduled"
+        if clear_queue_pos:
+            cur = conn.execute("""
+                UPDATE posts 
+                SET status = ?, tiktok_id = COALESCE(?, tiktok_id),
+                    error_message = ?, posted_at = COALESCE(?, posted_at),
+                    queue_position = NULL
+                WHERE id = ?
+            """, (status, tiktok_id, error_message, posted_at, post_id))
+            _compact_queue_positions(conn)
+        else:
+            cur = conn.execute("""
+                UPDATE posts 
+                SET status = ?, tiktok_id = COALESCE(?, tiktok_id),
+                    error_message = ?, posted_at = COALESCE(?, posted_at)
+                WHERE id = ?
+            """, (status, tiktok_id, error_message, posted_at, post_id))
         return cur.rowcount > 0
+
+
+def queue_post(post_id: int, front: bool = False, db_path: Optional[str] = None) -> Optional[int]:
+    """Add a post to the scheduled post queue (or move to front if front=True)."""
+    conn = get_db(db_path)
+    with conn:
+        row = conn.execute("SELECT id, status, queue_position FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if not row:
+            return None
+
+        if row["status"] == "scheduled" and not front:
+            _compact_queue_positions(conn)
+            updated = conn.execute("SELECT queue_position FROM posts WHERE id = ?", (post_id,)).fetchone()
+            return updated["queue_position"] if updated else 1
+
+        if front:
+            conn.execute("""
+                UPDATE posts SET queue_position = COALESCE(queue_position, 0) + 1
+                WHERE status = 'scheduled' AND id != ?
+            """, (post_id,))
+            conn.execute("""
+                UPDATE posts SET status = 'scheduled', queue_position = 1, error_message = NULL
+                WHERE id = ?
+            """, (post_id,))
+        else:
+            max_row = conn.execute("""
+                SELECT COALESCE(MAX(queue_position), 0) AS max_pos FROM posts WHERE status = 'scheduled'
+            """).fetchone()
+            next_pos = (max_row["max_pos"] if max_row else 0) + 1
+            conn.execute("""
+                UPDATE posts SET status = 'scheduled', queue_position = ?, error_message = NULL
+                WHERE id = ?
+            """, (next_pos, post_id))
+
+        _compact_queue_positions(conn)
+        updated = conn.execute("SELECT queue_position FROM posts WHERE id = ?", (post_id,)).fetchone()
+        return updated["queue_position"] if updated else None
+
+
+def get_queued_posts(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT * FROM posts
+        WHERE status = 'scheduled'
+        ORDER BY COALESCE(queue_position, 999999) ASC, id ASC
+    """)
+    return [dict(r) for r in cur.fetchall()]
+
+
+def pop_next_queued_post(db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Return the first post in the scheduled queue (without removing it yet)."""
+    conn = get_db(db_path)
+    row = conn.execute("""
+        SELECT * FROM posts
+        WHERE status = 'scheduled'
+        ORDER BY COALESCE(queue_position, 999999) ASC, id ASC
+        LIMIT 1
+    """).fetchone()
+    return dict(row) if row else None
+
+
+def remove_from_queue(post_id: int, db_path: Optional[str] = None) -> bool:
+    """Remove a post from the queue, reverting its status to 'rendered'."""
+    conn = get_db(db_path)
+    with conn:
+        cur = conn.execute("""
+            UPDATE posts SET status = 'rendered', queue_position = NULL
+            WHERE id = ? AND status = 'scheduled'
+        """, (post_id,))
+        if cur.rowcount > 0:
+            _compact_queue_positions(conn)
+            return True
+        return False
+
+
+def reorder_queue(post_ids: List[int], db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Reorder queued posts according to post_ids; any other queued posts remain at the end."""
+    conn = get_db(db_path)
+    with conn:
+        existing_rows = conn.execute("""
+            SELECT id FROM posts
+            WHERE status = 'scheduled'
+            ORDER BY COALESCE(queue_position, 999999) ASC, id ASC
+        """).fetchall()
+        existing_ids = [r["id"] for r in existing_rows]
+        existing_set = set(existing_ids)
+
+        ordered: List[int] = []
+        seen = set()
+        for pid in post_ids:
+            if pid in existing_set and pid not in seen:
+                ordered.append(pid)
+                seen.add(pid)
+        for pid in existing_ids:
+            if pid not in seen:
+                ordered.append(pid)
+
+        for idx, pid in enumerate(ordered, start=1):
+            conn.execute("UPDATE posts SET queue_position = ? WHERE id = ?", (idx, pid))
+
+    return get_queued_posts(db_path=db_path)
+
+
+def clear_queue(db_path: Optional[str] = None) -> int:
+    """Remove all posts from the scheduled queue, reverting them to 'rendered'."""
+    conn = get_db(db_path)
+    with conn:
+        cur = conn.execute("""
+            UPDATE posts SET status = 'rendered', queue_position = NULL
+            WHERE status = 'scheduled'
+        """)
+        return cur.rowcount
 
 
 def get_recent_posts(limit: int = 50, db_path: Optional[str] = None) -> List[Dict[str, Any]]:

@@ -10,7 +10,7 @@ import json
 import threading
 import logging
 from contextlib import asynccontextmanager
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -22,7 +22,8 @@ from core.db import (
     init_db, count_tracks, get_available_tracks, get_recent_posts,
     get_all_tracks, add_track, add_to_blacklist, remove_from_blacklist,
     get_blacklist, get_all_settings, set_setting, get_post_by_id,
-    update_post_status, is_track_posted, is_blacklisted
+    update_post_status, is_track_posted, is_blacklisted,
+    queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue
 )
 from core.charts import seed_charts_if_empty
 from core.pipeline import generate_post_video
@@ -123,6 +124,10 @@ class CookieFileImportRequest(BaseModel):
     content: str
 
 
+class QueueReorderRequest(BaseModel):
+    post_ids: List[int]
+
+
 # --- API Endpoints ---
 
 @app.get("/api/status")
@@ -132,6 +137,7 @@ def api_status():
     avail_wild = len(get_available_tracks(is_wildcard=True))
     posts = get_recent_posts(limit=500)
     posted_count = sum(1 for p in posts if p["status"] in ("posted", "draft"))
+    queued_count = len(get_queued_posts())
     cookie_health = check_cookie_health()
 
     return {
@@ -143,7 +149,8 @@ def api_status():
             "available_tracks": avail_all,
             "available_wildcards": avail_wild,
             "total_posts": len(posts),
-            "published_count": posted_count
+            "published_count": posted_count,
+            "queued_count": queued_count
         },
         "generation": gen_state,
         "publish": publish_state
@@ -267,6 +274,66 @@ def api_publish_post(post_id: int, auto_publish: Optional[bool] = None):
 @app.get("/api/publish/status")
 def api_publish_status():
     return publish_state
+
+
+def _attach_video_urls(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for item in items:
+        if item.get("video_path"):
+            item["video_url"] = f"/output/{os.path.basename(item['video_path'])}"
+        else:
+            item["video_url"] = None
+    return items
+
+
+@app.get("/api/queue")
+def api_get_queue():
+    items = _attach_video_urls(get_queued_posts())
+    return {
+        "queue": items,
+        "next_scheduled_run": daemon.next_run_info,
+    }
+
+
+@app.post("/api/posts/{post_id}/queue")
+def api_queue_post(post_id: int, front: bool = False):
+    post = get_post_by_id(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    if not post.get("video_path") or not os.path.exists(post["video_path"]):
+        raise HTTPException(status_code=400, detail="Video file missing on disk.")
+
+    pos = queue_post(post_id, front=front)
+    if pos is None:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    items = _attach_video_urls(get_queued_posts())
+    return {
+        "ok": True,
+        "post_id": post_id,
+        "queue_position": pos,
+        "queue_length": len(items),
+        "queue": items,
+    }
+
+
+@app.post("/api/queue/reorder")
+def api_reorder_queue(req: QueueReorderRequest):
+    items = _attach_video_urls(reorder_queue(req.post_ids))
+    return {"ok": True, "queue": items}
+
+
+@app.delete("/api/queue/{post_id}")
+def api_remove_from_queue(post_id: int):
+    ok = remove_from_queue(post_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Post is not currently in the queue.")
+    items = _attach_video_urls(get_queued_posts())
+    return {"ok": True, "queue": items}
+
+
+@app.delete("/api/queue")
+def api_clear_queue():
+    cleared = clear_queue()
+    return {"ok": True, "cleared": cleared, "queue": []}
 
 
 @app.get("/api/tracks")
