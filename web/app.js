@@ -6,6 +6,7 @@ if ("serviceWorker" in navigator) {
 
 let currentPreviewPostId = null;
 let pollTimer = null;
+let publishPollTimer = null;
 
 // --- Navigation ---
 document.querySelectorAll(".nav-btn").forEach((btn) => {
@@ -50,6 +51,9 @@ async function refreshStatus() {
 
     if (data.generation && data.generation.running && !pollTimer) {
       startProgressPolling();
+    }
+    if (data.publish && data.publish.running && !publishPollTimer) {
+      startPublishPolling();
     }
   } catch (e) {
     console.error("Status refresh failed", e);
@@ -130,15 +134,70 @@ document.getElementById("btn-publish-preview").addEventListener("click", async (
   await publishPost(currentPreviewPostId);
 });
 
+function setPublishButtonsDisabled(disabled) {
+  const previewBtn = document.getElementById("btn-publish-preview");
+  if (previewBtn) previewBtn.disabled = disabled;
+  document.querySelectorAll(".btn-publish-post").forEach((btn) => {
+    btn.disabled = disabled;
+  });
+}
+
+function renderPublishProgress(progress, message) {
+  const pct = Math.max(0, Math.min(100, Number(progress) || 0));
+  const pairs = [
+    ["publish-preview-progress-box", "publish-preview-progress-fill", "publish-preview-progress-msg"],
+    ["publish-posts-progress-box", "publish-posts-progress-fill", "publish-posts-progress-msg"],
+  ];
+  pairs.forEach(([boxId, fillId, msgId]) => {
+    const box = document.getElementById(boxId);
+    const fill = document.getElementById(fillId);
+    const msg = document.getElementById(msgId);
+    if (!box || !fill || !msg) return;
+    box.classList.remove("hidden");
+    fill.style.width = `${pct}%`;
+    msg.textContent = message || "Uploading to TikTok...";
+  });
+}
+
+function startPublishPolling() {
+  setPublishButtonsDisabled(true);
+  renderPublishProgress(5, "Starting TikTok upload...");
+
+  if (publishPollTimer) clearInterval(publishPollTimer);
+  publishPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch("/api/publish/status");
+      const st = await res.json();
+      const prefix = st.label ? `${st.label}: ` : "";
+      renderPublishProgress(st.progress, `${prefix}${st.message}`);
+
+      if (!st.running) {
+        clearInterval(publishPollTimer);
+        publishPollTimer = null;
+        setPublishButtonsDisabled(false);
+        loadPosts();
+        refreshStatus();
+        if (st.error) {
+          alert("TikTok Upload Error: " + st.error);
+        }
+      }
+    } catch (e) {
+      console.error("Publish status poll failed", e);
+    }
+  }, 1000);
+}
+
 async function publishPost(postId) {
-  const res = await fetch(`/api/posts/${postId}/publish`, { method: "POST" });
-  const data = await res.json();
-  if (!res.ok) {
-    alert("TikTok Upload Error: " + (data.detail || "Unknown error"));
-  } else {
-    alert(data.message);
-    loadPosts();
-    refreshStatus();
+  try {
+    const res = await fetch(`/api/posts/${postId}/publish`, { method: "POST" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert("TikTok Upload Error: " + (data.detail || `HTTP ${res.status}`));
+      return;
+    }
+    startPublishPolling();
+  } catch (err) {
+    alert("TikTok Upload Error: " + (err.message || err));
   }
 }
 
@@ -166,7 +225,7 @@ async function loadPosts() {
       </div>
       <div class="item-actions">
         ${p.video_url ? `<button class="btn-small" onclick="previewFromList('${p.video_url}', '${p.artist.replace(/'/g, "\\'")}', '${p.title.replace(/'/g, "\\'")}', '${p.chart_info}', ${p.id})">▶️</button>` : ""}
-        <button class="btn-small" onclick="publishPost(${p.id})">🚀 Post</button>
+        <button class="btn-small btn-publish-post" ${publishPollTimer ? "disabled" : ""} onclick="publishPost(${p.id})">🚀 Post</button>
       </div>
     `;
     list.appendChild(el);

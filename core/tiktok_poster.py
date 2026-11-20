@@ -11,7 +11,7 @@ import math
 import time
 import random
 import logging
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Callable
 from playwright.sync_api import sync_playwright
 
 try:
@@ -561,12 +561,18 @@ def upload_to_tiktok(
     video_path: str,
     caption: str,
     auto_publish: bool = False,
-    db_path: Optional[str] = None
+    db_path: Optional[str] = None,
+    progress_cb: Optional[Callable[[str, int], None]] = None,
 ) -> Dict[str, Any]:
     """
     Upload video to TikTok Studio using stealth Playwright & session cookies.
     If auto_publish is False, uploads & fills caption then saves/leaves as draft.
     """
+    def _prog(msg: str, pct: int) -> None:
+        logger.info("[%d%%] %s", pct, msg)
+        if progress_cb:
+            progress_cb(msg, pct)
+
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
 
@@ -576,6 +582,7 @@ def upload_to_tiktok(
 
     cookies = parse_cookies(get_setting("cookies_json", "", db_path=db_path) or "")
 
+    _prog("Launching stealth browser & loading session cookies...", 10)
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
@@ -598,7 +605,7 @@ def upload_to_tiktok(
         _apply_stealth(page)
 
         try:
-            logger.info("Navigating to TikTok Studio upload page...")
+            _prog("Opening TikTok Studio upload page...", 25)
             page.goto("https://www.tiktok.com/tiktokstudio/upload", wait_until="domcontentloaded", timeout=45000)
             _human_sleep(2.5, 4.5)
 
@@ -608,15 +615,17 @@ def upload_to_tiktok(
             _dismiss_modals(page)
 
             # Locate file input
+            _prog("Attaching video file to TikTok Studio...", 40)
             file_input = page.locator('input[type="file"]').first
             file_input.set_input_files(video_path, timeout=30000)
-            logger.info("Video file attached, waiting for upload & processing...")
+            _prog("Uploading & processing video on TikTok...", 55)
             _human_sleep(5.0, 8.0)
 
             # Dismiss any post-upload TikTok Studio modals (e.g. automatic content check prompt)
             _dismiss_modals(page)
 
             # Wait for caption editor
+            _prog("Preparing caption & hashtags...", 70)
             caption_box = page.locator('[contenteditable="true"]').first
             caption_box.wait_for(state="visible", timeout=60000)
             _dismiss_modals(page)
@@ -639,6 +648,7 @@ def upload_to_tiktok(
             _dismiss_modals(page)
 
             if auto_publish:
+                _prog("Publishing video to TikTok...", 85)
                 post_btn = page.locator('button[data-e2e="post_video_button"]').first
                 if post_btn.count() == 0:
                     post_btn = page.locator('button:has-text("Post")').last
@@ -659,6 +669,7 @@ def upload_to_tiktok(
                 status = "posted"
                 msg = "Published to TikTok."
             else:
+                _prog("Saving video to TikTok Drafts...", 85)
                 # Save as draft if button exists, otherwise leave uploaded
                 draft_btn = page.locator('button[data-e2e="save_draft_button"]').first
                 if draft_btn.count() == 0:
@@ -671,6 +682,7 @@ def upload_to_tiktok(
                 status = "draft"
                 msg = "Uploaded to TikTok Drafts."
 
+            _prog(msg, 100)
             return {"status": status, "message": msg}
         except Exception:
             logger.error("TikTok upload failed at URL: %s", page.url)

@@ -52,6 +52,18 @@ gen_state: Dict[str, Any] = {
 }
 gen_lock = threading.Lock()
 
+# Live TikTok publish job state
+publish_state: Dict[str, Any] = {
+    "running": False,
+    "post_id": None,
+    "label": "",
+    "progress": 0,
+    "message": "Idle",
+    "status": None,
+    "error": None
+}
+publish_lock = threading.Lock()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -133,7 +145,8 @@ def api_status():
             "total_posts": len(posts),
             "published_count": posted_count
         },
-        "generation": gen_state
+        "generation": gen_state,
+        "publish": publish_state
     }
 
 
@@ -207,14 +220,53 @@ def api_publish_post(post_id: int, auto_publish: Optional[bool] = None):
         settings = get_all_settings()
         auto_publish = settings.get("auto_publish", "false") == "true"
 
+    label = f"{post['artist']} - {post['title']}"
+    with publish_lock:
+        if publish_state["running"]:
+            raise HTTPException(status_code=409, detail="A TikTok upload is already in progress.")
+        publish_state["running"] = True
+        publish_state["post_id"] = post_id
+        publish_state["label"] = label
+        publish_state["progress"] = 5
+        publish_state["message"] = f"Starting TikTok upload for {label}..."
+        publish_state["status"] = None
+        publish_state["error"] = None
+
     caption = build_caption(post["artist"], post["title"], post["year"], post.get("chart_info", ""))
-    try:
-        res = upload_to_tiktok(post["video_path"], caption, auto_publish=auto_publish)
-        update_post_status(post_id, res["status"])
-        return {"ok": True, "status": res["status"], "message": res["message"]}
-    except Exception as e:
-        update_post_status(post_id, "failed", error_message=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+    video_path = post["video_path"]
+
+    def _worker():
+        def _cb(msg: str, pct: int):
+            publish_state["message"] = msg
+            publish_state["progress"] = pct
+
+        try:
+            res = upload_to_tiktok(
+                video_path,
+                caption,
+                auto_publish=auto_publish,
+                progress_cb=_cb,
+            )
+            update_post_status(post_id, res["status"])
+            publish_state["status"] = res["status"]
+            publish_state["message"] = res["message"]
+            publish_state["progress"] = 100
+        except Exception as e:
+            logger.exception("TikTok publish worker error")
+            update_post_status(post_id, "failed", error_message=str(e))
+            publish_state["status"] = "failed"
+            publish_state["error"] = str(e)
+            publish_state["message"] = f"Error: {e}"
+        finally:
+            publish_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"started": True, "post_id": post_id}
+
+
+@app.get("/api/publish/status")
+def api_publish_status():
+    return publish_state
 
 
 @app.get("/api/tracks")
