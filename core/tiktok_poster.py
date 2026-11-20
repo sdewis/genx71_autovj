@@ -318,8 +318,14 @@ def build_caption(artist: str, title: str, year: int, chart_info: str) -> str:
     )
 
 
-_MODAL_SELECTOR = '[role="dialog"], .TUXModal'
-_OVERLAY_SELECTOR = '.TUXModal-overlay[data-transition-status="open"]'
+_MODAL_SELECTOR = (
+    '[role="dialog"], .TUXModal, .react-joyride__tooltip, '
+    '[data-test-id="tooltip"], [class*="joyride" i][role="alertdialog"]'
+)
+_OVERLAY_SELECTOR = (
+    '.TUXModal-overlay[data-transition-status="open"], '
+    '.react-joyride__overlay, [class*="joyride__overlay" i]'
+)
 _UNSAFE_BUTTON_WORDS = ("discard", "delete", "remove", "leave", "exit", "log out", "logout")
 _SAFE_DISMISS_LABELS = (
     "not now",
@@ -335,6 +341,16 @@ _SAFE_DISMISS_LABELS = (
     "accept",
     "continue",
 )
+# Labels that only ever appear on onboarding/callout popups, never on upload form controls
+_CALLOUT_BUTTON_SELECTORS = (
+    'button:has-text("Got it")',
+    'button:has-text("Not now")',
+    'button:has-text("Maybe later")',
+    'button:has-text("No thanks")',
+    '[role="button"]:has-text("Got it")',
+    '[data-floating-ui-portal] button:has-text("Skip")',
+    '.react-joyride__tooltip button',
+)
 
 
 def _is_unsafe_button_label(text: str) -> bool:
@@ -342,11 +358,37 @@ def _is_unsafe_button_label(text: str) -> bool:
     return any(word in lower for word in _UNSAFE_BUTTON_WORDS)
 
 
-def _dismiss_modals(page: Any, max_rounds: int = 5) -> int:
+def _click_callout_button(page: Any) -> bool:
+    """Click any visible onboarding/feature-tour callout button (e.g. 'Got it')."""
+    for sel in _CALLOUT_BUTTON_SELECTORS:
+        try:
+            btns = page.locator(sel)
+            count = btns.count()
+        except Exception:
+            continue
+        for idx in range(count - 1, -1, -1):
+            btn = btns.nth(idx)
+            try:
+                if not btn.is_visible():
+                    continue
+                label = (btn.inner_text(timeout=1000) or "").strip()
+                aria = (btn.get_attribute("aria-label") or "").strip()
+                if _is_unsafe_button_label(f"{label} {aria}"):
+                    continue
+                logger.info("Dismissing TikTok Studio callout button: %s", label or sel)
+                btn.click(timeout=3000)
+                _human_sleep(0.6, 1.2)
+                return True
+            except Exception as exc:
+                logger.debug("Callout button click failed (%s): %s", sel, exc)
+    return False
+
+
+def _dismiss_modals(page: Any, max_rounds: int = 6) -> int:
     """
-    Detect and dismiss blocking TikTok Studio modals/overlays (e.g. TUXModal
-    prompts like 'Turn on automatic content checks?' or feature callouts)
-    without clicking destructive buttons like 'Discard' or 'Delete'.
+    Detect and dismiss blocking TikTok Studio modals, overlays, and feature-tour
+    popovers (e.g. 'Turn on automatic content checks?', 'New editing features added'
+    / 'Got it') without clicking destructive buttons like 'Discard' or 'Delete'.
     """
     dismissed = 0
     for _ in range(max_rounds):
@@ -374,6 +416,11 @@ def _dismiss_modals(page: Any, max_rounds: int = 5) -> int:
             overlay_visible = False
 
         if visible_dialog is None and not overlay_visible:
+            # Even without a standard modal/overlay selector, check for feature-tour
+            # callout buttons like "Got it" (e.g. "New editing features added")
+            if _click_callout_button(page):
+                dismissed += 1
+                continue
             break
 
         clicked = False
@@ -432,6 +479,11 @@ def _dismiss_modals(page: Any, max_rounds: int = 5) -> int:
                     continue
                 except Exception as exc:
                     logger.debug("Modal button click failed: %s", exc)
+
+        # If an overlay is open without a matched dialog button, try callout buttons first
+        if _click_callout_button(page):
+            dismissed += 1
+            continue
 
         # Fallback: press Escape to close modal/overlay
         try:

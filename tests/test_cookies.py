@@ -294,3 +294,49 @@ def test_apply_stealth_supports_v2_and_v1(monkeypatch):
     assert tp._apply_stealth("page2") is True
     assert calls == [("v1", "page2")]
 
+
+def test_dismiss_modals_clicks_standalone_got_it_callout():
+    from core.tiktok_poster import _dismiss_modals
+
+    clicked = []
+    visible = {"got_it": True}
+
+    class FakeCalloutBtn:
+        def is_visible(self):
+            return visible["got_it"]
+
+        def inner_text(self, timeout=None):
+            return "Got it"
+
+        def get_attribute(self, name):
+            return ""
+
+        def click(self, timeout=None):
+            clicked.append("Got it")
+            visible["got_it"] = False
+
+    class FakeLoc:
+        def __init__(self, items):
+            self._items = items
+
+        def count(self):
+            return len(self._items)
+
+        def nth(self, idx):
+            return self._items[idx]
+
+        @property
+        def first(self):
+            return self._items[0] if self._items else FakeCalloutBtn()
+
+    class FakePage:
+        def locator(self, selector):
+            if 'Got it' in selector and visible["got_it"]:
+                return FakeLoc([FakeCalloutBtn()])
+            return FakeLoc([])
+
+    dismissed = _dismiss_modals(FakePage(), max_rounds=3)
+    assert dismissed == 1
+    assert clicked == ["Got it"]
+
+
