@@ -32,11 +32,11 @@ WIDTH = 1080
 HEIGHT = 1920
 FPS = 30
 
-# Fact card layout (safely below EQ bars at y=1365 and above TikTok caption UI at y=1560+)
+# Fact card layout (safely below EQ bars at y=1330 and above TikTok caption UI at y=1560+)
 FACT_CARD_W = 920
-FACT_CARD_H = 148
+FACT_CARD_H = 192
 FACT_CARD_X = (WIDTH - FACT_CARD_W) // 2
-FACT_CARD_Y = 1395
+FACT_CARD_Y = 1352
 
 # Animated watermark lifecycle (seconds)
 WM_SPIN_IN_SEC = 0.8
@@ -271,16 +271,16 @@ def _render_fact_card(fact_text: str, index: int, total: int, accent: Tuple[int,
         width=2,
     )
 
-    font_label = _load_font(21, bold=True)
-    font_fact = _load_font(27, bold=False)
+    font_label = _load_font(24, bold=True)
+    font_fact = _load_font(34, bold=False)
 
     label_text = f"FACT {index + 1}/{total}"
-    draw.text((FACT_CARD_W // 2, 26), label_text, fill=(accent[0], accent[1], accent[2], 245), font=font_label, anchor="mm")
+    draw.text((FACT_CARD_W // 2, 28), label_text, fill=(accent[0], accent[1], accent[2], 245), font=font_label, anchor="mm")
 
-    lines = _wrap_text(fact_text, font_fact, FACT_CARD_W - 64, draw, max_lines=3)
-    line_h = 33
+    lines = _wrap_text(fact_text, font_fact, FACT_CARD_W - 60, draw, max_lines=3)
+    line_h = 44
     block_h = len(lines) * line_h
-    start_y = 48 + max(0, (FACT_CARD_H - 54 - block_h) // 2) + line_h // 2
+    start_y = 50 + max(0, (FACT_CARD_H - 58 - block_h) // 2) + line_h // 2
     for i, line in enumerate(lines):
         draw.text((FACT_CARD_W // 2, start_y + i * line_h), line, fill=(248, 248, 255, 250), font=font_fact, anchor="mm")
 
@@ -510,7 +510,7 @@ def render_tiktok_video(
     bar_gap = 12
     eq_total_w = n_bars * bar_width + (n_bars - 1) * bar_gap
     eq_start_x = (WIDTH - eq_total_w) // 2
-    eq_base_y = 1365
+    eq_base_y = 1330
 
     try:
         for frame_idx in range(total_frames):
@@ -547,14 +547,14 @@ def render_tiktok_video(
                 fill_w = max(10, int(pb_w * progress))
                 card_draw.rounded_rectangle([pb_x, pb_y, pb_x + fill_w, pb_y + pb_h], radius=5, fill=(accent[0], accent[1], accent[2], 255))
 
-            # Draw Beat-Reactive Equalizer Bars
+            # Draw Beat-Reactive Equalizer Bars (compact height to leave room for larger fact card)
             eq_draw = ImageDraw.Draw(frame)
             for b in range(n_bars):
                 # Symmetric bell curve + wave modulation
                 dist_center = abs(b - (n_bars - 1) / 2.0) / (n_bars / 2.0)
                 envelope_shape = max(0.25, 1.0 - dist_center * 0.7)
                 wave = 0.55 + 0.45 * math.sin(t_sec * 10.0 + b * 0.7)
-                bar_h = int(14 + (energy * 95 * envelope_shape * wave))
+                bar_h = int(10 + (energy * 56 * envelope_shape * wave))
                 bx0 = eq_start_x + b * (bar_width + bar_gap)
                 by0 = eq_base_y - bar_h
                 eq_draw.rounded_rectangle(
@@ -563,7 +563,7 @@ def render_tiktok_video(
                     fill=(accent[0], accent[1], accent[2], 215)
                 )
 
-            # Composite active fading Track Fact card (y=1395..1543)
+            # Composite active fading Track Fact card (y=1352..1544)
             for idx, slot in enumerate(fact_schedule):
                 f_alpha = get_fact_alpha(slot, t_sec)
                 if f_alpha > 0.005:
