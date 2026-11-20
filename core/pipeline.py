@@ -5,6 +5,7 @@ Shared by both the 24/7 background daemon and the FastAPI Admin PWA.
 
 import os
 import re
+import random
 import logging
 from datetime import datetime
 from typing import Optional, Dict, Any, Callable
@@ -21,6 +22,28 @@ from core.tiktok_poster import upload_to_tiktok, build_caption, check_cookie_hea
 
 logger = logging.getLogger(__name__)
 
+# 1988: CD sales surpassed vinyl LPs and CDs became commonly available
+CD_ERA_START_YEAR = 1988
+VINYL_AUDIOPHILE_CHANCE = 0.25
+
+
+def select_era_appropriate_template(
+    year: Optional[int],
+    rng: Optional[random.Random] = None,
+) -> str:
+    """
+    Select a visual template matching the track's release era:
+    - CD era (year >= 1988): 'cd'
+    - Vinyl era (year < 1988 or unknown): 25% chance 'retro' (audiophile card), 75% 'vinyl'
+    """
+    if year is not None and year >= CD_ERA_START_YEAR:
+        return "cd"
+
+    r = rng if rng is not None else random
+    if r.random() < VINYL_AUDIOPHILE_CHANCE:
+        return "retro"
+    return "vinyl"
+
 
 def _safe_filename(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_")[:50]
@@ -29,6 +52,7 @@ def _safe_filename(text: str) -> str:
 def generate_post_video(
     track_id: Optional[int] = None,
     template: Optional[str] = None,
+    era_appropriate: Optional[bool] = None,
     force_wildcard: Optional[bool] = None,
     publish: bool = False,
     progress_cb: Optional[Callable[[str, int], None]] = None,
@@ -59,7 +83,19 @@ def generate_post_video(
     title = track["title"]
     year = track["year"]
     chart_badge = format_chart_badge(track)
-    chosen_template = template or get_setting("default_template", "vinyl", db_path=db_path) or "vinyl"
+
+    if era_appropriate is True or template == "era":
+        chosen_template = select_era_appropriate_template(year)
+    elif era_appropriate is False:
+        chosen_template = template or get_setting("default_template", "vinyl", db_path=db_path) or "vinyl"
+    else:
+        if template:
+            chosen_template = template
+        elif get_setting("era_appropriate_template", "false", db_path=db_path) == "true":
+            chosen_template = select_era_appropriate_template(year)
+        else:
+            chosen_template = get_setting("default_template", "vinyl", db_path=db_path) or "vinyl"
+
     wm_opacity = float(get_setting("watermark_opacity", "0.40", db_path=db_path) or "0.40")
 
     _prog(f"Fetching artwork & trivia facts for {artist} - {title}...", 25)

@@ -57,8 +57,13 @@ async function refreshStatus() {
 }
 
 async function triggerGeneration(opts = {}) {
+  const eraAppropriate = document.getElementById("gen-era-appropriate").checked;
   const template = document.getElementById("gen-template").value;
-  const payload = { template, ...opts };
+  const payload = {
+    template: eraAppropriate ? null : template,
+    era_appropriate: eraAppropriate,
+    ...opts
+  };
 
   const res = await fetch("/api/generate", {
     method: "POST",
@@ -112,6 +117,10 @@ function showPreview(post) {
   vid.src = videoUrl;
   document.getElementById("btn-download-preview").href = videoUrl;
 }
+
+document.getElementById("gen-era-appropriate").addEventListener("change", (e) => {
+  document.getElementById("gen-template").disabled = e.target.checked;
+});
 
 document.getElementById("btn-gen-random").addEventListener("click", () => triggerGeneration({ force_wildcard: false }));
 document.getElementById("btn-gen-wildcard").addEventListener("click", () => triggerGeneration({ force_wildcard: true }));
@@ -257,10 +266,17 @@ async function loadSettings() {
   document.getElementById("set-wildcard").value = settings.wildcard_chance || "25";
   document.getElementById("wildcard-val").textContent = settings.wildcard_chance || "25";
   document.getElementById("set-template").value = settings.default_template || "vinyl";
+  const eraAppropriate = settings.era_appropriate_template === "true";
+  document.getElementById("set-era-appropriate").checked = eraAppropriate;
+  document.getElementById("set-template").disabled = eraAppropriate;
   document.getElementById("set-wm-opacity").value = settings.watermark_opacity || "0.40";
   document.getElementById("wm-val").textContent = settings.watermark_opacity || "0.40";
   document.getElementById("set-auto-publish").checked = settings.auto_publish === "true";
 }
+
+document.getElementById("set-era-appropriate").addEventListener("change", (e) => {
+  document.getElementById("set-template").disabled = e.target.checked;
+});
 
 document.getElementById("set-wildcard").addEventListener("input", (e) => {
   document.getElementById("wildcard-val").textContent = e.target.value;
@@ -279,6 +295,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       jitter_minutes: document.getElementById("set-jitter").value,
       wildcard_chance: document.getElementById("set-wildcard").value,
       default_template: document.getElementById("set-template").value,
+      era_appropriate_template: document.getElementById("set-era-appropriate").checked ? "true" : "false",
       watermark_opacity: document.getElementById("set-wm-opacity").value,
       auto_publish: document.getElementById("set-auto-publish").checked ? "true" : "false"
     }

@@ -89,6 +89,7 @@ def init_db(db_path: Optional[str] = None) -> None:
             "jitter_minutes": "30",
             "wildcard_chance": "25",
             "default_template": "vinyl",
+            "era_appropriate_template": "false",
             "auto_publish": "false",  # Drafts first or direct publish
             "watermark_opacity": "0.40",
             "cookies_json": ""

@@ -77,6 +77,7 @@ app.add_middleware(
 class GenerateRequest(BaseModel):
     track_id: Optional[int] = None
     template: Optional[str] = None
+    era_appropriate: Optional[bool] = None
     force_wildcard: Optional[bool] = None
     publish: bool = False
 
@@ -156,6 +157,7 @@ def api_generate(req: GenerateRequest):
             post = generate_post_video(
                 track_id=req.track_id,
                 template=req.template,
+                era_appropriate=req.era_appropriate,
                 force_wildcard=req.force_wildcard,
                 publish=req.publish,
                 progress_cb=_cb

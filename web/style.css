@@ -203,6 +203,11 @@ input:focus, select:focus, textarea:focus {
   border-color: var(--cyan);
 }
 
+select:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .btn-group {
   display: grid;
   grid-template-columns: 1fr;

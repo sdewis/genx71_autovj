@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from core.db import init_db, add_track, get_track_by_id
+from core.db import init_db, add_track, get_track_by_id, set_setting
 from core.charts import GENX_CHART_CATALOG, seed_charts_if_empty, select_next_track, format_chart_badge
 from core.artwork import _create_fallback_artwork, extract_palette
 from core.audio import (
@@ -20,6 +20,10 @@ from core.audio import (
     prepare_track_audio, MIN_CLIP_DURATION, MAX_CLIP_DURATION
 )
 from core.facts import CURATED_TRACK_FACTS, get_or_fetch_track_facts
+from core.pipeline import (
+    select_era_appropriate_template, generate_post_video,
+    CD_ERA_START_YEAR, VINYL_AUDIOPHILE_CHANCE
+)
 from core.video_renderer import (
     render_tiktok_video, compute_fact_schedule, get_fact_alpha,
     generate_watermark_schedule, get_watermark_state,
@@ -240,3 +244,84 @@ def test_api_endpoints():
 
         # Clean up test cookie
         client.post("/api/cookies", json={"cookies_json": ""})
+
+
+def test_select_era_appropriate_template():
+    import random
+
+    # CD era (1988+) always selects 'cd'
+    for year in (CD_ERA_START_YEAR, 1990, 1994, 1996):
+        rng = random.Random(123)
+        results = {select_era_appropriate_template(year, rng=rng) for _ in range(50)}
+        assert results == {"cd"}
+
+    # Vinyl era (pre-1988) selects 'vinyl' (~75%) or 'retro' audiophile (~25%)
+    rng = random.Random(42)
+    samples = [select_era_appropriate_template(1983, rng=rng) for _ in range(2000)]
+    assert set(samples) == {"vinyl", "retro"}
+    retro_ratio = samples.count("retro") / len(samples)
+    assert abs(retro_ratio - VINYL_AUDIOPHILE_CHANCE) < 0.03
+
+    # Exact threshold check around 25%
+    class _FixedRng:
+        def __init__(self, val: float):
+            self.val = val
+        def random(self) -> float:
+            return self.val
+
+    assert select_era_appropriate_template(1985, rng=_FixedRng(0.249)) == "retro"
+    assert select_era_appropriate_template(1985, rng=_FixedRng(0.25)) == "vinyl"
+    assert select_era_appropriate_template(1987, rng=_FixedRng(0.10)) == "retro"
+    assert select_era_appropriate_template(1988, rng=_FixedRng(0.10)) == "cd"
+
+
+def test_pipeline_era_appropriate_template_selection(temp_db, monkeypatch):
+    tid_vinyl = add_track("Vinyl Era Band", "Analog Hit", 1983, chart_peak=5, db_path=temp_db)
+    tid_cd = add_track("CD Era Band", "Digital Hit", 1992, chart_peak=3, db_path=temp_db)
+
+    rendered_templates = []
+
+    monkeypatch.setattr("core.pipeline.get_single_artwork", lambda a, t: "/tmp/fake_art.jpg")
+    monkeypatch.setattr("core.pipeline.get_or_fetch_track_facts", lambda tr, db_path=None: ["F1", "F2", "F3"])
+    monkeypatch.setattr(
+        "core.pipeline.prepare_track_audio",
+        lambda a, t: {"audio_path": "/tmp/fake.wav", "rms_envelope": [0.5], "duration": 35.0, "source_url": "mock"}
+    )
+    monkeypatch.setattr(
+        "core.pipeline.render_tiktok_video",
+        lambda **kwargs: rendered_templates.append(kwargs["template"]) or kwargs["output_path"]
+    )
+
+    # Explicit era_appropriate=True picks 'cd' for 1992 track even if template='vinyl' is passed
+    post_cd = generate_post_video(
+        track_id=tid_cd, template="vinyl", era_appropriate=True, publish=False, db_path=temp_db
+    )
+    assert post_cd["template_used"] == "cd"
+    assert rendered_templates[-1] == "cd"
+
+    # Explicit era_appropriate=True picks 'retro' when RNG < 0.25 for 1983 track
+    monkeypatch.setattr("core.pipeline.random.random", lambda: 0.10)
+    post_retro = generate_post_video(
+        track_id=tid_vinyl, template="cd", era_appropriate=True, publish=False, db_path=temp_db
+    )
+    assert post_retro["template_used"] == "retro"
+    assert rendered_templates[-1] == "retro"
+
+    # Explicit era_appropriate=True picks 'vinyl' when RNG >= 0.25 for 1983 track
+    monkeypatch.setattr("core.pipeline.random.random", lambda: 0.50)
+    post_vinyl = generate_post_video(
+        track_id=tid_vinyl, template="cd", era_appropriate=True, publish=False, db_path=temp_db
+    )
+    assert post_vinyl["template_used"] == "vinyl"
+    assert rendered_templates[-1] == "vinyl"
+
+    # Scheduled/default mode (template=None, era_appropriate=None) honors DB setting
+    set_setting("era_appropriate_template", "true", db_path=temp_db)
+    post_sched_cd = generate_post_video(track_id=tid_cd, publish=False, db_path=temp_db)
+    assert post_sched_cd["template_used"] == "cd"
+
+    set_setting("era_appropriate_template", "false", db_path=temp_db)
+    set_setting("default_template", "retro", db_path=temp_db)
+    post_sched_default = generate_post_video(track_id=tid_cd, publish=False, db_path=temp_db)
+    assert post_sched_default["template_used"] == "retro"
+
