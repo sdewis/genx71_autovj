@@ -17,11 +17,21 @@ Automated 1978–1996 GenX Chart Hit TikTok Video Studio, 24/7 Background Schedu
 
 ## Quick Start
 
+### Option 1: Docker (Recommended)
+
+```bash
+docker compose up -d --build
+```
+
+### Option 2: Local Python Environment
+
 ```bash
 ./run.sh
 ```
 
 Open `http://localhost:8710` on Linux or `http://<your-linux-ip>:8710` on your Samsung Galaxy S24 Ultra (tap **Add to Home Screen / Install App** for standalone mode).
+
+For full installation, Docker, Tailscale, TikTok cookie setup, and usage instructions, see the **[GenX71 AutoVJ Wiki](https://github.com/sdewis/genx71_autovj/wiki)**.
 
 ## Running Tests
 

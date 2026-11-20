@@ -1,0 +1,18 @@
+services:
+  genx71-autovj:
+    build: .
+    image: genx71-autovj:latest
+    container_name: genx71-autovj
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    ports:
+      - "${PORT:-8710}:8710"
+    environment:
+      - TZ=${TZ:-Europe/London}
+      - HOST=0.0.0.0
+      - PORT=8710
+    volumes:
+      - ./data:/app/data
+      - ./output:/app/output
+      - ./cache:/app/cache
