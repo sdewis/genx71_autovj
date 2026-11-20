@@ -6,6 +6,7 @@ and Linux desktop browsers.
 """
 
 import os
+import json
 import threading
 import logging
 from contextlib import asynccontextmanager
@@ -25,7 +26,10 @@ from core.db import (
 )
 from core.charts import seed_charts_if_empty
 from core.pipeline import generate_post_video
-from core.tiktok_poster import check_cookie_health, upload_to_tiktok, build_caption
+from core.tiktok_poster import (
+    check_cookie_health, upload_to_tiktok, build_caption,
+    parse_cookies, parse_cookies_json_secure, CookieParseError
+)
 from core.video_renderer import OUTPUT_DIR
 from daemon import AutoVJDaemon
 
@@ -99,6 +103,11 @@ class SettingsUpdateRequest(BaseModel):
 
 class CookiesUpdateRequest(BaseModel):
     cookies_json: str
+
+
+class CookieFileImportRequest(BaseModel):
+    filename: str
+    content: str
 
 
 # --- API Endpoints ---
@@ -261,7 +270,7 @@ def api_get_settings():
     # Mask cookies for display security
     raw_cookies = settings.get("cookies_json", "")
     settings["has_cookies"] = "true" if raw_cookies else "false"
-    if len(raw_cookies) > 40:
+    if raw_cookies:
         settings["cookies_json"] = "***CONFIGURED***"
     return {"settings": settings}
 
@@ -278,9 +287,50 @@ def api_update_settings(req: SettingsUpdateRequest):
 
 @app.post("/api/cookies")
 def api_update_cookies(req: CookiesUpdateRequest):
-    set_setting("cookies_json", req.cookies_json.strip())
+    raw = req.cookies_json.strip()
+    if not raw:
+        set_setting("cookies_json", "")
+        health = check_cookie_health()
+        return {"ok": health["healthy"], "health": health}
+
+    cleaned = raw.lstrip("\ufeff").strip()
+    if cleaned.startswith("[") or cleaned.startswith("{"):
+        try:
+            cookies = parse_cookies_json_secure(cleaned)
+        except CookieParseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    else:
+        cookies = parse_cookies(cleaned)
+        if not cookies:
+            raise HTTPException(status_code=400, detail="No valid TikTok cookies found.")
+
+    set_setting("cookies_json", json.dumps(cookies))
     health = check_cookie_health()
     return {"ok": health["healthy"], "health": health}
+
+
+@app.post("/api/cookies/import")
+def api_import_cookies_file(req: CookieFileImportRequest):
+    raw_name = (req.filename or "").strip()
+    if "\x00" in raw_name:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    safe_name = os.path.basename(raw_name.replace("\\", "/"))
+    if not safe_name or not safe_name.lower().endswith(".json"):
+        raise HTTPException(status_code=400, detail="Only .json cookie files are supported.")
+
+    try:
+        cookies = parse_cookies_json_secure(req.content)
+    except CookieParseError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    set_setting("cookies_json", json.dumps(cookies))
+    health = check_cookie_health()
+    return {
+        "ok": health["healthy"],
+        "health": health,
+        "imported_count": len(cookies),
+        "filename": safe_name,
+    }
 
 
 # --- Static Files & PWA Routes ---

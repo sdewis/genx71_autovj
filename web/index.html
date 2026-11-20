@@ -169,7 +169,19 @@
 
       <div class="card form-stack" style="margin-top: 16px;">
         <h3>TikTok Session Cookies</h3>
-        <p class="muted">Paste exported JSON cookies from your browser (must include <code>sessionid</code>) to enable automated posting.</p>
+        <p class="muted">Import an exported <code>.json</code> cookie file from your browser (must include <code>sessionid</code>) or paste JSON below to enable automated posting.</p>
+
+        <div id="cookies-dropzone" class="file-dropzone" tabindex="0" role="button" aria-label="Browse for TikTok cookie JSON file">
+          <input type="file" id="cookies-file-input" accept=".json,application/json" class="hidden" />
+          <div class="file-dropzone-icon">📂</div>
+          <div class="file-dropzone-text">
+            <strong>Import Cookie <code>.json</code> File</strong>
+            <span id="cookies-file-name" class="muted">Tap to browse files or drag &amp; drop here</span>
+          </div>
+          <button type="button" id="btn-browse-cookies" class="btn btn-secondary btn-small">Browse…</button>
+        </div>
+
+        <div class="divider-label"><span>or paste JSON manually</span></div>
         <textarea id="cookies-input" rows="4" placeholder='[{"name": "sessionid", "value": "...", "domain": ".tiktok.com"}]'></textarea>
         <button id="btn-save-cookies" class="btn btn-accent">Save &amp; Validate Cookies</button>
         <p id="cookie-status-msg" class="muted"></p>

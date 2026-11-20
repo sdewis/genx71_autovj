@@ -292,16 +292,121 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   refreshStatus();
 });
 
+function setCookieStatus(message, level = "muted") {
+  const el = document.getElementById("cookie-status-msg");
+  el.textContent = message;
+  el.className = level === "ok" ? "status-ok" : level === "warn" ? "status-warn" : level === "err" ? "status-err" : "muted";
+}
+
+async function importCookieFile(file) {
+  const fileNameEl = document.getElementById("cookies-file-name");
+  if (!file) return;
+
+  if (!file.name.toLowerCase().endsWith(".json")) {
+    setCookieStatus("Only .json cookie files are supported.", "err");
+    return;
+  }
+
+  const maxBytes = 512 * 1024;
+  if (file.size > maxBytes) {
+    setCookieStatus("Cookie file is too large (max 512 KB).", "err");
+    return;
+  }
+
+  const kb = (file.size / 1024).toFixed(1);
+  fileNameEl.textContent = `${file.name} (${kb} KB)`;
+  setCookieStatus("Validating and importing cookies...", "muted");
+
+  try {
+    const content = await file.text();
+    const res = await fetch("/api/cookies/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, content })
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      setCookieStatus(data.detail || "Failed to import cookie file.", "err");
+      return;
+    }
+
+    const level = data.health.healthy ? "ok" : "warn";
+    setCookieStatus(
+      `Imported ${data.imported_count} TikTok cookie(s) from ${data.filename}. ${data.health.reason}`,
+      level
+    );
+    document.getElementById("cookies-input").value = "";
+    refreshStatus();
+  } catch (err) {
+    setCookieStatus("Failed to read or upload cookie file.", "err");
+  }
+}
+
+const cookiesDropzone = document.getElementById("cookies-dropzone");
+const cookiesFileInput = document.getElementById("cookies-file-input");
+const btnBrowseCookies = document.getElementById("btn-browse-cookies");
+
+btnBrowseCookies.addEventListener("click", (e) => {
+  e.stopPropagation();
+  cookiesFileInput.click();
+});
+
+cookiesDropzone.addEventListener("click", () => {
+  cookiesFileInput.click();
+});
+
+cookiesDropzone.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" || e.key === " ") {
+    e.preventDefault();
+    cookiesFileInput.click();
+  }
+});
+
+cookiesFileInput.addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (file) {
+    importCookieFile(file);
+  }
+  cookiesFileInput.value = "";
+});
+
+cookiesDropzone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  cookiesDropzone.classList.add("drag-over");
+});
+
+cookiesDropzone.addEventListener("dragleave", () => {
+  cookiesDropzone.classList.remove("drag-over");
+});
+
+cookiesDropzone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  cookiesDropzone.classList.remove("drag-over");
+  const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+  if (file) {
+    importCookieFile(file);
+  }
+});
+
 document.getElementById("btn-save-cookies").addEventListener("click", async () => {
   const cookies_json = document.getElementById("cookies-input").value;
-  const res = await fetch("/api/cookies", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ cookies_json })
-  });
-  const data = await res.json();
-  document.getElementById("cookie-status-msg").textContent = data.health.reason;
-  refreshStatus();
+  try {
+    const res = await fetch("/api/cookies", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cookies_json })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      setCookieStatus(data.detail || "Invalid cookie data.", "err");
+      return;
+    }
+    setCookieStatus(data.health.reason, data.health.healthy ? "ok" : "warn");
+    refreshStatus();
+  } catch (err) {
+    setCookieStatus("Failed to save cookies.", "err");
+  }
 });
 
 async function loadBlacklist() {
