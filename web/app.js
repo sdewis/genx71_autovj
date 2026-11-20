@@ -345,16 +345,6 @@ async function importCookieFile(file) {
 
 const cookiesDropzone = document.getElementById("cookies-dropzone");
 const cookiesFileInput = document.getElementById("cookies-file-input");
-const btnBrowseCookies = document.getElementById("btn-browse-cookies");
-
-btnBrowseCookies.addEventListener("click", (e) => {
-  e.stopPropagation();
-  cookiesFileInput.click();
-});
-
-cookiesDropzone.addEventListener("click", () => {
-  cookiesFileInput.click();
-});
 
 cookiesDropzone.addEventListener("keydown", (e) => {
   if (e.key === "Enter" || e.key === " ") {
