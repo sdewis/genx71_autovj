@@ -23,7 +23,8 @@ from core.db import get_setting, set_setting
 
 logger = logging.getLogger(__name__)
 
-MAX_COOKIE_FILE_BYTES = 512 * 1024  # 512 KB
+MAX_COOKIE_FILE_BYTES = 2 * 1024 * 1024  # 2 MB
+MAX_RAW_COOKIE_ITEMS = 5000
 MAX_COOKIE_COUNT = 200
 MAX_COOKIE_NAME_LEN = 256
 MAX_COOKIE_VALUE_LEN = 8192
@@ -88,8 +89,10 @@ def _parse_expires(raw_cookie: Dict[str, Any]) -> Optional[float]:
 def parse_cookies_json_secure(raw_json: str) -> List[Dict[str, Any]]:
     """
     Strictly and securely parse a TikTok cookie JSON export.
-    Supports Cookie-Editor / EditThisCookie arrays (`[...]`) and
-    Playwright/wrapper objects (`{"cookies": [...]}`).
+    Supports:
+      - Cookie-Editor / EditThisCookie arrays (`[...]`)
+      - Playwright / wrapper objects (`{"cookies": [...]}`)
+      - Flat key-value maps (`{"sessionid": "...", ...}`)
     Validates types, sizes, control characters, paths, and restricts domains to *.tiktok.com.
     Raises CookieParseError on malformed or unsafe input.
     """
@@ -99,7 +102,7 @@ def parse_cookies_json_secure(raw_json: str) -> List[Dict[str, Any]]:
     raw_bytes = raw_json.encode("utf-8", errors="strict")
     if len(raw_bytes) > MAX_COOKIE_FILE_BYTES:
         raise CookieParseError(
-            f"Cookie file exceeds maximum allowed size ({MAX_COOKIE_FILE_BYTES // 1024} KB)."
+            f"Cookie file exceeds maximum allowed size ({MAX_COOKIE_FILE_BYTES // (1024 * 1024)} MB)."
         )
 
     cleaned = raw_json.lstrip("\ufeff").strip()
@@ -116,22 +119,42 @@ def parse_cookies_json_secure(raw_json: str) -> List[Dict[str, Any]]:
     if isinstance(data, dict):
         if "cookies" in data and isinstance(data["cookies"], list):
             cookie_items = data["cookies"]
+        elif data and all(isinstance(k, str) and isinstance(v, str) for k, v in data.items()):
+            cookie_items = [
+                {"name": k, "value": v, "domain": ".tiktok.com", "path": "/"}
+                for k, v in data.items()
+            ]
         else:
-            raise CookieParseError("JSON object must contain a 'cookies' array.")
+            raise CookieParseError(
+                "JSON object must contain a 'cookies' array or a map of cookie names to string values."
+            )
     elif isinstance(data, list):
         cookie_items = data
     else:
         raise CookieParseError("Cookie JSON must be an array of cookie objects.")
 
-    if len(cookie_items) > MAX_COOKIE_COUNT:
+    if len(cookie_items) > MAX_RAW_COOKIE_ITEMS:
         raise CookieParseError(
-            f"Too many cookies ({len(cookie_items)}); maximum allowed is {MAX_COOKIE_COUNT}."
+            f"Too many cookie entries ({len(cookie_items)}); maximum allowed is {MAX_RAW_COOKIE_ITEMS}."
         )
 
     normalized: List[Dict[str, Any]] = []
     for idx, item in enumerate(cookie_items):
         if not isinstance(item, dict):
             raise CookieParseError(f"Cookie entry at index {idx} must be a JSON object.")
+
+        raw_domain = item.get("domain", ".tiktok.com")
+        if raw_domain is None or raw_domain == "":
+            domain = ".tiktok.com"
+        elif isinstance(raw_domain, str):
+            domain = raw_domain.strip().lower()
+            if _has_control_chars(domain):
+                raise CookieParseError(f"Cookie entry at index {idx} has invalid domain characters.")
+            if not _is_tiktok_domain(domain):
+                # Skip non-TikTok cookies if user exported a full browser cookie jar
+                continue
+        else:
+            raise CookieParseError(f"Cookie entry at index {idx} has invalid domain type.")
 
         name = item.get("name")
         value = item.get("value")
@@ -148,19 +171,6 @@ def parse_cookies_json_secure(raw_json: str) -> List[Dict[str, Any]]:
         if _has_control_chars(value):
             raise CookieParseError(f"Cookie '{name}' value contains invalid control characters.")
 
-        raw_domain = item.get("domain", ".tiktok.com")
-        if raw_domain is None or raw_domain == "":
-            domain = ".tiktok.com"
-        elif isinstance(raw_domain, str):
-            domain = raw_domain.strip().lower()
-            if _has_control_chars(domain):
-                raise CookieParseError(f"Cookie '{name}' domain contains invalid characters.")
-            if not _is_tiktok_domain(domain):
-                # Skip non-TikTok cookies if user exported a full browser cookie jar
-                continue
-        else:
-            raise CookieParseError(f"Cookie '{name}' has invalid domain type.")
-
         raw_path = item.get("path", "/")
         if raw_path is None or raw_path == "":
             path = "/"
@@ -170,6 +180,11 @@ def parse_cookies_json_secure(raw_json: str) -> List[Dict[str, Any]]:
                 raise CookieParseError(f"Cookie '{name}' has an invalid path.")
         else:
             raise CookieParseError(f"Cookie '{name}' has invalid path type.")
+
+        if len(normalized) >= MAX_COOKIE_COUNT:
+            raise CookieParseError(
+                f"Too many TikTok cookies (exceeds maximum of {MAX_COOKIE_COUNT})."
+            )
 
         cookie: Dict[str, Any] = {
             "name": name,

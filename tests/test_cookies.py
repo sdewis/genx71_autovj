@@ -69,6 +69,24 @@ def test_parse_playwright_storage_state_wrapper():
     assert cookies[0]["sameSite"] == "Lax"
 
 
+def test_parse_flat_dict_json():
+    raw = json.dumps({"sessionid": "flat_tok_123", "tt_csrf_token": "csrf_abc"})
+    cookies = parse_cookies_json_secure(raw)
+    assert len(cookies) == 2
+    assert {c["name"] for c in cookies} == {"sessionid", "tt_csrf_token"}
+
+
+def test_parse_large_multi_site_export_filters_before_limit():
+    items = [
+        {"name": f"other_{i}", "value": "v", "domain": ".example.com"}
+        for i in range(MAX_COOKIE_COUNT + 50)
+    ]
+    items.append({"name": "sessionid", "value": "tt_real", "domain": ".tiktok.com"})
+    cookies = parse_cookies_json_secure(json.dumps(items))
+    assert len(cookies) == 1
+    assert cookies[0]["name"] == "sessionid"
+
+
 @pytest.mark.parametrize("bad_payload", [
     "",
     "   ",

@@ -300,6 +300,7 @@ function setCookieStatus(message, level = "muted") {
 
 async function importCookieFile(file) {
   const fileNameEl = document.getElementById("cookies-file-name");
+  const cookiesInput = document.getElementById("cookies-input");
   if (!file) return;
 
   if (!file.name.toLowerCase().endsWith(".json")) {
@@ -307,39 +308,51 @@ async function importCookieFile(file) {
     return;
   }
 
-  const maxBytes = 512 * 1024;
+  const maxBytes = 2 * 1024 * 1024;
   if (file.size > maxBytes) {
-    setCookieStatus("Cookie file is too large (max 512 KB).", "err");
+    setCookieStatus("Cookie file is too large (max 2 MB).", "err");
     return;
   }
 
   const kb = (file.size / 1024).toFixed(1);
   fileNameEl.textContent = `${file.name} (${kb} KB)`;
-  setCookieStatus("Validating and importing cookies...", "muted");
+  setCookieStatus("Reading and validating cookie file...", "muted");
 
   try {
     const content = await file.text();
-    const res = await fetch("/api/cookies/import", {
+    cookiesInput.value = content;
+
+    let res = await fetch("/api/cookies/import", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filename: file.name, content })
     });
-    const data = await res.json();
+
+    // Fallback if backend has not been restarted yet for /api/cookies/import
+    if (res.status === 404) {
+      res = await fetch("/api/cookies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookies_json: content })
+      });
+    }
+
+    const data = await res.json().catch(() => ({}));
 
     if (!res.ok) {
-      setCookieStatus(data.detail || "Failed to import cookie file.", "err");
+      setCookieStatus(data.detail || `Failed to import cookie file (HTTP ${res.status}).`, "err");
       return;
     }
 
-    const level = data.health.healthy ? "ok" : "warn";
-    setCookieStatus(
-      `Imported ${data.imported_count} TikTok cookie(s) from ${data.filename}. ${data.health.reason}`,
-      level
-    );
-    document.getElementById("cookies-input").value = "";
+    const health = data.health || { healthy: Boolean(data.ok), reason: "Cookies saved." };
+    const level = health.healthy ? "ok" : "warn";
+    const countPart = typeof data.imported_count === "number"
+      ? `Imported ${data.imported_count} TikTok cookie(s) from ${data.filename || file.name}. `
+      : `Loaded ${file.name}. `;
+    setCookieStatus(`${countPart}${health.reason}`, level);
     refreshStatus();
   } catch (err) {
-    setCookieStatus("Failed to read or upload cookie file.", "err");
+    setCookieStatus(`Failed to read or upload cookie file: ${err.message || err}`, "err");
   }
 }
 
@@ -387,15 +400,16 @@ document.getElementById("btn-save-cookies").addEventListener("click", async () =
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cookies_json })
     });
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      setCookieStatus(data.detail || "Invalid cookie data.", "err");
+      setCookieStatus(data.detail || `Invalid cookie data (HTTP ${res.status}).`, "err");
       return;
     }
-    setCookieStatus(data.health.reason, data.health.healthy ? "ok" : "warn");
+    const health = data.health || { healthy: Boolean(data.ok), reason: "Cookies saved." };
+    setCookieStatus(health.reason, health.healthy ? "ok" : "warn");
     refreshStatus();
   } catch (err) {
-    setCookieStatus("Failed to save cookies.", "err");
+    setCookieStatus(`Failed to save cookies: ${err.message || err}`, "err");
   }
 });
 
