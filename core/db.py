@@ -95,11 +95,15 @@ def init_db(db_path: Optional[str] = None) -> None:
         CREATE TABLE IF NOT EXISTS analytics_reports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             report_date TEXT NOT NULL,
+            period_type TEXT NOT NULL DEFAULT 'daily',
             model_used TEXT NOT NULL,
             summary_markdown TEXT NOT NULL,
             top_posts_json TEXT,
             improvements_json TEXT,
             feedback_weights_json TEXT,
+            period_comparison_json TEXT,
+            lessons_learned_json TEXT,
+            outcome_evaluation_json TEXT,
             posts_analyzed INTEGER DEFAULT 0,
             elapsed_sec REAL DEFAULT 0.0,
             status TEXT NOT NULL DEFAULT 'completed',
@@ -108,11 +112,29 @@ def init_db(db_path: Optional[str] = None) -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
 
+        CREATE TABLE IF NOT EXISTS analytics_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER NOT NULL,
+            snapshot_date TEXT NOT NULL,
+            views INTEGER DEFAULT 0,
+            likes INTEGER DEFAULT 0,
+            comments INTEGER DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            saves INTEGER DEFAULT 0,
+            engagement_rate REAL DEFAULT 0.0,
+            completion_rate REAL DEFAULT 0.0,
+            performance_score REAL DEFAULT 0.0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(post_id, snapshot_date),
+            FOREIGN KEY(post_id) REFERENCES posts(id) ON DELETE CASCADE
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tracks_artist_title ON tracks(artist, title);
         CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
         CREATE INDEX IF NOT EXISTS idx_posts_artist_title ON posts(artist, title);
         CREATE INDEX IF NOT EXISTS idx_post_analytics_post_id ON post_analytics(post_id);
         CREATE INDEX IF NOT EXISTS idx_analytics_reports_date ON analytics_reports(report_date DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_analytics_snapshots_date ON analytics_snapshots(snapshot_date DESC, post_id);
         """)
 
         # Safe migrations for existing databases on tracks
@@ -139,6 +161,19 @@ def init_db(db_path: Optional[str] = None) -> None:
             if col_name not in post_cols:
                 conn.execute(f"ALTER TABLE posts ADD COLUMN {col_name} {col_type}")
 
+        # Safe migrations for existing databases on analytics_reports
+        rep_cols = {row["name"] for row in conn.execute("PRAGMA table_info(analytics_reports)").fetchall()}
+        rep_migrations = {
+            "period_type": "TEXT NOT NULL DEFAULT 'daily'",
+            "period_comparison_json": "TEXT",
+            "lessons_learned_json": "TEXT",
+            "outcome_evaluation_json": "TEXT",
+        }
+        for col_name, col_type in rep_migrations.items():
+            if col_name not in rep_cols:
+                conn.execute(f"ALTER TABLE analytics_reports ADD COLUMN {col_name} {col_type}")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_analytics_reports_period ON analytics_reports(period_type, id DESC)")
+
         # Default settings if not already set
         defaults = {
             "schedule_enabled": "true",
@@ -156,6 +191,8 @@ def init_db(db_path: Optional[str] = None) -> None:
             "tts_worker_url": "",
             "analytics_report_enabled": "true",
             "analytics_report_time": "02:00",
+            "analytics_weekly_enabled": "true",
+            "analytics_monthly_enabled": "true",
             "analytics_auto_sync": "true",
             "analytics_feedback_enabled": "true",
             "analytics_feedback_strength": "0.5",
@@ -722,6 +759,23 @@ def upsert_post_analytics(
             round(awt, 2), round(comp, 2), eng_rate, perf_score,
             tiktok_url, source, now_iso, now_iso,
         ))
+        # Also record a daily snapshot so weekly/monthly velocity can be tracked over time
+        snap_date = now_iso[:10]
+        conn.execute("""
+            INSERT INTO analytics_snapshots (
+                post_id, snapshot_date, views, likes, comments, shares, saves,
+                engagement_rate, completion_rate, performance_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id, snapshot_date) DO UPDATE SET
+                views = excluded.views,
+                likes = excluded.likes,
+                comments = excluded.comments,
+                shares = excluded.shares,
+                saves = excluded.saves,
+                engagement_rate = excluded.engagement_rate,
+                completion_rate = excluded.completion_rate,
+                performance_score = excluded.performance_score
+        """, (post_id, snap_date, v, l, c, sh, sv, eng_rate, round(comp, 2), perf_score))
         row = conn.execute("SELECT * FROM post_analytics WHERE post_id = ?", (post_id,)).fetchone()
         return dict(row) if row else {}
 
@@ -783,28 +837,38 @@ def save_analytics_report(
     status: str = "completed",
     error_message: Optional[str] = None,
     applied_to_feedback: bool = False,
+    period_type: str = "daily",
+    period_comparison: Optional[Dict[str, Any]] = None,
+    lessons_learned: Optional[List[str]] = None,
+    outcome_evaluation: Optional[Dict[str, Any]] = None,
     db_path: Optional[str] = None,
 ) -> int:
-    """Persist a daily AI analytics report."""
+    """Persist a daily, weekly, or monthly AI analytics report."""
     import json
 
+    period = period_type if period_type in ("daily", "weekly", "monthly") else "daily"
     conn = get_db(db_path)
     with conn:
         if applied_to_feedback:
             conn.execute("UPDATE analytics_reports SET applied_to_feedback = 0")
         cur = conn.execute("""
             INSERT INTO analytics_reports (
-                report_date, model_used, summary_markdown,
+                report_date, period_type, model_used, summary_markdown,
                 top_posts_json, improvements_json, feedback_weights_json,
+                period_comparison_json, lessons_learned_json, outcome_evaluation_json,
                 posts_analyzed, elapsed_sec, status, error_message, applied_to_feedback
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             report_date,
+            period,
             model_used,
             summary_markdown,
             json.dumps(top_posts or []),
             json.dumps(improvements or []),
             json.dumps(feedback_weights or {}),
+            json.dumps(period_comparison or {}),
+            json.dumps(lessons_learned or []),
+            json.dumps(outcome_evaluation) if outcome_evaluation else None,
             int(posts_analyzed),
             round(float(elapsed_sec or 0.0), 2),
             status,
@@ -820,10 +884,14 @@ def _hydrate_report_row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
     if not row:
         return None
     d = dict(row)
+    d["period_type"] = d.get("period_type") or "daily"
     for json_col, out_key, default in (
         ("top_posts_json", "top_posts", []),
         ("improvements_json", "improvements", []),
         ("feedback_weights_json", "feedback_weights", {}),
+        ("period_comparison_json", "period_comparison", {}),
+        ("lessons_learned_json", "lessons_learned", []),
+        ("outcome_evaluation_json", "outcome_evaluation", None),
     ):
         raw = d.get(json_col)
         try:
@@ -833,13 +901,25 @@ def _hydrate_report_row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
     return d
 
 
-def get_analytics_reports(limit: int = 30, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+def get_analytics_reports(
+    limit: int = 30,
+    period_type: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     conn = get_db(db_path)
-    cur = conn.execute("""
-        SELECT * FROM analytics_reports
-        ORDER BY id DESC
-        LIMIT ?
-    """, (limit,))
+    if period_type in ("daily", "weekly", "monthly"):
+        cur = conn.execute("""
+            SELECT * FROM analytics_reports
+            WHERE COALESCE(period_type, 'daily') = ?
+            ORDER BY id DESC
+            LIMIT ?
+        """, (period_type, limit))
+    else:
+        cur = conn.execute("""
+            SELECT * FROM analytics_reports
+            ORDER BY id DESC
+            LIMIT ?
+        """, (limit,))
     return [_hydrate_report_row(r) for r in cur.fetchall()]
 
 
@@ -849,10 +929,49 @@ def get_analytics_report_by_id(report_id: int, db_path: Optional[str] = None) ->
     return _hydrate_report_row(row)
 
 
-def get_latest_analytics_report(db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def get_latest_analytics_report(
+    period_type: Optional[str] = None,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     conn = get_db(db_path)
-    row = conn.execute("SELECT * FROM analytics_reports ORDER BY id DESC LIMIT 1").fetchone()
+    if period_type in ("daily", "weekly", "monthly"):
+        row = conn.execute("""
+            SELECT * FROM analytics_reports
+            WHERE COALESCE(period_type, 'daily') = ?
+            ORDER BY id DESC LIMIT 1
+        """, (period_type,)).fetchone()
+    else:
+        row = conn.execute("SELECT * FROM analytics_reports ORDER BY id DESC LIMIT 1").fetchone()
     return _hydrate_report_row(row)
+
+
+def update_report_outcome_evaluation(
+    report_id: int,
+    evaluation: Dict[str, Any],
+    db_path: Optional[str] = None,
+) -> bool:
+    """Persist the measured post-hoc evaluation of a past report's suggestions."""
+    import json
+
+    conn = get_db(db_path)
+    with conn:
+        cur = conn.execute(
+            "UPDATE analytics_reports SET outcome_evaluation_json = ? WHERE id = ?",
+            (json.dumps(evaluation), report_id),
+        )
+        return cur.rowcount > 0
+
+
+def get_evaluated_learning_history(limit: int = 8, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return past reports that have measured suggestion outcomes (newest first)."""
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT * FROM analytics_reports
+        WHERE outcome_evaluation_json IS NOT NULL AND outcome_evaluation_json != ''
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,))
+    return [_hydrate_report_row(r) for r in cur.fetchall()]
 
 
 def mark_report_applied(report_id: int, db_path: Optional[str] = None) -> bool:
@@ -881,4 +1000,5 @@ def get_active_feedback_weights(db_path: Optional[str] = None) -> Optional[Dict[
     hydrated = _hydrate_report_row(row)
     weights = hydrated.get("feedback_weights") if hydrated else None
     return weights if isinstance(weights, dict) and weights else None
+
 

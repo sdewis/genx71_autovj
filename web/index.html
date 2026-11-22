@@ -9,7 +9,7 @@
   <title>GenX71 AutoVJ Studio</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/logo.png" type="image/png" />
-  <link rel="stylesheet" href="/static/style.css?v=4.0" />
+  <link rel="stylesheet" href="/static/style.css?v=4.1" />
 </head>
 <body>
   <div class="app-shell">
@@ -575,9 +575,20 @@
               <span>Enable daily automated analytics report</span>
             </label>
 
+            <div class="form-row-2">
+              <label class="checkbox-label">
+                <input type="checkbox" id="ana-weekly-enabled" checked />
+                <span>📅 Weekly review (Sundays)</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="ana-monthly-enabled" checked />
+                <span>🗓️ Monthly review (1st of month)</span>
+              </label>
+            </div>
+
             <label class="checkbox-label">
               <input type="checkbox" id="ana-auto-sync" checked />
-              <span>Auto-sync existing post stats from TikTok Studio before daily report</span>
+              <span>Auto-sync existing post stats from TikTok Studio before scheduled report</span>
             </label>
 
             <label class="checkbox-label">
@@ -591,9 +602,11 @@
             </div>
 
             <div class="analytics-actions-grid">
-              <button type="button" id="btn-run-analytics" class="btn btn-primary">🧠 Run AI Report Now</button>
-              <button type="button" id="btn-sync-analytics" class="btn btn-accent">🔄 Sync from TikTok</button>
-              <button type="button" id="btn-pull-llm" class="btn btn-secondary">⬇️ Pull LLM Model</button>
+              <button type="button" id="btn-run-analytics" class="btn btn-primary">🧠 Daily Report</button>
+              <button type="button" id="btn-run-weekly" class="btn btn-primary">📅 Weekly Report</button>
+              <button type="button" id="btn-run-monthly" class="btn btn-primary">🗓️ Monthly Report</button>
+              <button type="button" id="btn-sync-analytics" class="btn btn-accent">🔄 Sync TikTok</button>
+              <button type="button" id="btn-pull-llm" class="btn btn-secondary">⬇️ Pull LLM</button>
               <button type="button" id="btn-save-analytics-cfg" class="btn btn-secondary">💾 Save Config</button>
             </div>
 
@@ -607,14 +620,33 @@
 
           <div class="card form-stack">
             <div class="voice-profile-header">
-              <h3>📋 Daily AI Performance Report</h3>
-              <select id="ana-report-select" class="report-select" aria-label="Select daily report">
-                <option value="">No reports yet</option>
-              </select>
+              <h3>🔁 Weekly &amp; Monthly Trends + AI Learning Loop</h3>
+              <span id="ana-learning-badge" class="badge">0 evaluated</span>
+            </div>
+            <div id="ana-period-trends" class="period-trends-grid"></div>
+            <div id="ana-learning-ledger" class="learning-ledger">
+              <p class="muted">As you run weekly &amp; monthly analyses after publishing new posts, the AI automatically grades its past suggestions (successes vs. failures) and feeds those lessons back into future analyses.</p>
+            </div>
+          </div>
+
+          <div class="card form-stack">
+            <div class="voice-profile-header">
+              <h3>📋 AI Performance Reports</h3>
+              <div class="section-actions">
+                <div class="period-filter-group" id="ana-period-filters">
+                  <button type="button" class="btn btn-small period-filter-btn active" data-period="all">All</button>
+                  <button type="button" class="btn btn-small period-filter-btn" data-period="daily">Daily</button>
+                  <button type="button" class="btn btn-small period-filter-btn" data-period="weekly">Weekly</button>
+                  <button type="button" class="btn btn-small period-filter-btn" data-period="monthly">Monthly</button>
+                </div>
+                <select id="ana-report-select" class="report-select" aria-label="Select AI report">
+                  <option value="">No reports yet</option>
+                </select>
+              </div>
             </div>
             <div id="ana-report-meta" class="muted"></div>
             <div id="ana-report-body" class="report-body">
-              <p class="muted">Run an AI report or wait for the scheduled 2:00 AM analysis to view top posts, improvement suggestions, and track-selection feedback.</p>
+              <p class="muted">Run a Daily, Weekly, or Monthly AI report (or wait for the scheduled 2:00 AM run) to view top posts, improvement suggestions, lessons learned, and track-selection feedback.</p>
             </div>
           </div>
 
@@ -718,6 +750,6 @@
     </button>
   </nav>
 
-  <script src="/static/app.js?v=4.0"></script>
+  <script src="/static/app.js?v=4.1"></script>
 </body>
 </html>

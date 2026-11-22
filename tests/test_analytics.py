@@ -338,3 +338,83 @@ def test_extract_tiktok_videos_from_json_and_matching(tmp_path):
     assert _match_post_row(local_posts, caption=v2["caption"], tiktok_id=v2["tiktok_id"])["post_id"] == 11
 
 
+def test_weekly_monthly_and_ai_learning_feedback_loop(tmp_path):
+    from datetime import timedelta
+    from core.db import get_db, save_analytics_report, get_analytics_report_by_id
+    from core.analytics import run_analytics_report, evaluate_past_reports
+
+    db_path = str(tmp_path / "learning.db")
+    init_db(db_path)
+
+    now = datetime.now()
+    ten_days_ago = (now - timedelta(days=10)).isoformat(timespec="seconds")
+    eight_days_ago = (now - timedelta(days=8)).isoformat(timespec="seconds")
+    two_days_ago = (now - timedelta(days=2)).isoformat(timespec="seconds")
+
+    # Baseline posts (10 days ago, prior week)
+    t_base = add_track("Duran Duran", "Rio", 1982, 9, "UK", 0, "New Romantic", db_path=db_path)
+    p_base = record_post(t_base, "Duran Duran", "Rio", 1982, "UK #9", template_used="vhs", status="posted", db_path=db_path)
+    upsert_post_analytics(p_base, views=3000, likes=200, comments=10, shares=15, completion_rate=35.0, db_path=db_path)
+
+    # Past AI report (8 days ago) that boosted Synth-Pop AND Grunge
+    old_rep_id = save_analytics_report(
+        report_date=(now - timedelta(days=8)).strftime("%Y-%m-%d"),
+        period_type="weekly",
+        model_used=DEFAULT_LLM_MODEL,
+        summary_markdown="Initial weekly bet on Synth-Pop and Grunge.",
+        feedback_weights=sanitize_feedback_weights({
+            "preferred_genres": {"Synth-Pop": 1.5, "Grunge": 1.4},
+            "preferred_decades": {"1980s": 1.3},
+            "preferred_templates": ["neon"],
+        }),
+        posts_analyzed=1,
+        applied_to_feedback=True,
+        db_path=db_path,
+    )
+
+    # Subsequent posts (2 days ago, current week): Synth-Pop succeeds, Grunge fails
+    t_win = add_track("New Order", "Blue Monday", 1983, 9, "UK", 0, "Synth-Pop", db_path=db_path)
+    p_win = record_post(t_win, "New Order", "Blue Monday", 1983, "UK #9", template_used="neon", status="posted", db_path=db_path)
+    upsert_post_analytics(p_win, views=28000, likes=3500, comments=210, shares=450, completion_rate=74.0, db_path=db_path)
+
+    t_fail = add_track("Nirvana", "Bleach", 1991, 20, "US", 0, "Grunge", db_path=db_path)
+    p_fail = record_post(t_fail, "Nirvana", "Bleach", 1991, "US #20", template_used="hifi", status="posted", db_path=db_path)
+    upsert_post_analytics(p_fail, views=250, likes=8, comments=0, shares=0, completion_rate=12.0, db_path=db_path)
+
+    # Backdate timestamps in SQLite to simulate real 10d -> 8d -> 2d timeline
+    conn = get_db(db_path)
+    with conn:
+        conn.execute("UPDATE posts SET posted_at = ?, created_at = ? WHERE id = ?", (ten_days_ago, ten_days_ago, p_base))
+        conn.execute("UPDATE analytics_reports SET created_at = ? WHERE id = ?", (eight_days_ago, old_rep_id))
+        conn.execute("UPDATE posts SET posted_at = ?, created_at = ? WHERE id IN (?, ?)", (two_days_ago, two_days_ago, p_win, p_fail))
+
+    # Run weekly report (offline fallback exercises both evaluation & learning_history)
+    with patch("core.llm_analyst.requests.get", side_effect=ConnectionError("offline")):
+        weekly_res = run_analytics_report(period="weekly", sync_first=False, auto_apply_feedback=True, db_path=db_path)
+        monthly_res = run_analytics_report(period="monthly", sync_first=False, auto_apply_feedback=False, db_path=db_path)
+
+    # Verify older report got graded with both a success (Synth-Pop) and a failure (Grunge)
+    graded_old = get_analytics_report_by_id(old_rep_id, db_path=db_path)
+    ev = graded_old["outcome_evaluation"]
+    assert ev is not None
+    assert ev["after_posts"] == 2
+    assert any("Synth-Pop" in s for s in ev["succeeded_suggestions"])
+    assert any("Grunge" in f for f in ev["failed_suggestions"])
+
+    # Verify weekly report has period_type, WoW comparison, and lessons_learned fed from past outcomes
+    w_rep = weekly_res["report"]
+    assert w_rep["period_type"] == "weekly"
+    assert w_rep["period_comparison"]["current_posts"] == 2
+    assert w_rep["period_comparison"]["previous_posts"] == 1
+    assert w_rep["period_comparison"]["views_delta_pct"] > 0
+    assert len(w_rep["lessons_learned"]) >= 2
+    assert any("Confirmed win" in l for l in w_rep["lessons_learned"])
+    assert any("Course-correcting" in l for l in w_rep["lessons_learned"])
+
+    # Verify monthly report saved cleanly with period_type='monthly'
+    m_rep = monthly_res["report"]
+    assert m_rep["period_type"] == "monthly"
+    assert m_rep["period_comparison"]["current_posts"] == 3
+
+
+

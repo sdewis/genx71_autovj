@@ -89,17 +89,36 @@ class AutoVJDaemon:
         return candidate
 
     def _run_analytics_job(self):
-        logger.info("Triggered scheduled daily GenX71 post analytics LLM report.")
+        logger.info("Triggered scheduled GenX71 post analytics LLM report.")
         try:
-            from core.analytics import run_daily_analytics_report
-            res = run_daily_analytics_report(db_path=self.db_path)
+            from core.analytics import run_analytics_report
+            res = run_analytics_report(period="daily", db_path=self.db_path)
             rep = res.get("report") or {}
             logger.info(
                 "Daily analytics report #%s finished (model=%s, posts=%s, status=%s)",
                 rep.get("id"), rep.get("model_used"), rep.get("posts_analyzed"), rep.get("status"),
             )
+
+            now = datetime.now()
+            if get_setting("analytics_weekly_enabled", "true", db_path=self.db_path) == "true" and now.weekday() == 6:
+                logger.info("Running scheduled weekly (Sunday) analytics report & AI self-evaluation...")
+                w_res = run_analytics_report(period="weekly", sync_first=False, db_path=self.db_path)
+                w_rep = w_res.get("report") or {}
+                logger.info(
+                    "Weekly analytics report #%s finished (model=%s, posts=%s)",
+                    w_rep.get("id"), w_rep.get("model_used"), w_rep.get("posts_analyzed"),
+                )
+
+            if get_setting("analytics_monthly_enabled", "true", db_path=self.db_path) == "true" and now.day == 1:
+                logger.info("Running scheduled monthly (1st of month) analytics report & AI self-evaluation...")
+                m_res = run_analytics_report(period="monthly", sync_first=False, db_path=self.db_path)
+                m_rep = m_res.get("report") or {}
+                logger.info(
+                    "Monthly analytics report #%s finished (model=%s, posts=%s)",
+                    m_rep.get("id"), m_rep.get("model_used"), m_rep.get("posts_analyzed"),
+                )
         except Exception as exc:
-            logger.error("Scheduled daily analytics report failed: %s", exc)
+            logger.error("Scheduled analytics report failed: %s", exc)
         finally:
             self.reschedule_analytics()
 

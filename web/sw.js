@@ -1,5 +1,5 @@
-const CACHE_NAME = "genx71-autovj-v4.0";
-const ASSETS = ["/", "/static/style.css?v=4.0", "/static/app.js?v=4.0", "/manifest.json", "/logo.png"];
+const CACHE_NAME = "genx71-autovj-v4.1";
+const ASSETS = ["/", "/static/style.css?v=4.1", "/static/app.js?v=4.1", "/manifest.json", "/logo.png"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(

@@ -9,7 +9,7 @@ import csv
 import json
 import logging
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 from core.db import (
@@ -19,7 +19,10 @@ from core.db import (
     get_post_analytics_rows,
     upsert_post_analytics,
     save_analytics_report,
+    get_analytics_reports,
     get_analytics_report_by_id,
+    update_report_outcome_evaluation,
+    get_evaluated_learning_history,
     mark_report_applied,
 )
 from core.llm_analyst import analyze_posts_with_llm
@@ -93,11 +96,120 @@ def _group_breakdown(rows: List[Dict[str, Any]], key_fn: Callable[[Dict[str, Any
     return summary
 
 
-def build_analytics_summary(db_path: Optional[str] = None) -> Dict[str, Any]:
-    """Aggregate existing post analytics into KPIs, category breakdowns, and rankings."""
+PERIOD_WINDOW_DAYS = {
+    "daily": 1,
+    "weekly": 7,
+    "monthly": 30,
+}
+
+
+def _parse_iso_dt(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=None)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s[:19], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _post_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
+    return _parse_iso_dt(row.get("posted_at")) or _parse_iso_dt(row.get("created_at"))
+
+
+def _pct_delta(curr: float, prev: float) -> Optional[float]:
+    if prev <= 0:
+        return None
+    return round(((curr - prev) / prev) * 100.0, 1)
+
+
+def _window_stats(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    n = len(items)
+    if n == 0:
+        return {"count": 0, "total_views": 0, "avg_views": 0.0, "avg_engagement": 0.0, "avg_completion": 0.0, "avg_score": 0.0}
+    total_views = sum(int(i.get("views", 0)) for i in items)
+    return {
+        "count": n,
+        "total_views": total_views,
+        "avg_views": round(total_views / n, 1),
+        "avg_engagement": round(sum(float(i.get("engagement_rate", 0.0)) for i in items) / n, 2),
+        "avg_completion": round(sum(float(i.get("completion_rate", 0.0)) for i in items) / n, 1),
+        "avg_score": round(sum(float(i.get("performance_score", 0.0)) for i in items) / n, 2),
+    }
+
+
+def build_analytics_summary(
+    db_path: Optional[str] = None,
+    period: str = "daily",
+    reference_dt: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """
+    Aggregate existing post analytics into KPIs, category breakdowns, rankings,
+    and period-over-period comparisons (daily, weekly 7d vs prior 7d, monthly 30d vs prior 30d).
+    """
     init_db(db_path)
+    period_key = period if period in PERIOD_WINDOW_DAYS else "daily"
+    window_days = PERIOD_WINDOW_DAYS[period_key]
+    now = (reference_dt or datetime.now()).replace(tzinfo=None)
+
     rows = get_post_analytics_rows(limit=500, db_path=db_path)
-    tracked = [r for r in rows if r.get("has_metrics") or int(r.get("views", 0)) > 0]
+    all_tracked = [r for r in rows if r.get("has_metrics") or int(r.get("views", 0)) > 0]
+
+    # Partition into current window vs previous window for weekly/monthly trends
+    curr_start = now - timedelta(days=window_days)
+    prev_start = now - timedelta(days=window_days * 2)
+    current_window_posts: List[Dict[str, Any]] = []
+    previous_window_posts: List[Dict[str, Any]] = []
+    for r in all_tracked:
+        ts = _post_timestamp(r)
+        if ts is None:
+            continue
+        if ts >= curr_start:
+            current_window_posts.append(r)
+        elif ts >= prev_start:
+            previous_window_posts.append(r)
+
+    used_all_time_fallback = False
+    if period_key in ("weekly", "monthly"):
+        if current_window_posts:
+            tracked = current_window_posts
+        else:
+            tracked = all_tracked
+            used_all_time_fallback = bool(all_tracked)
+    else:
+        tracked = all_tracked
+
+    curr_stats = _window_stats(current_window_posts)
+    prev_stats = _window_stats(previous_window_posts)
+    period_comparison = {
+        "period": period_key,
+        "window_days": window_days,
+        "current_posts": curr_stats["count"],
+        "previous_posts": prev_stats["count"],
+        "current_total_views": curr_stats["total_views"],
+        "previous_total_views": prev_stats["total_views"],
+        "current_avg_views": curr_stats["avg_views"],
+        "previous_avg_views": prev_stats["avg_views"],
+        "views_delta_pct": _pct_delta(curr_stats["avg_views"], prev_stats["avg_views"]),
+        "current_avg_engagement": curr_stats["avg_engagement"],
+        "previous_avg_engagement": prev_stats["avg_engagement"],
+        "engagement_delta_pct": _pct_delta(curr_stats["avg_engagement"], prev_stats["avg_engagement"]),
+        "current_avg_completion": curr_stats["avg_completion"],
+        "previous_avg_completion": prev_stats["avg_completion"],
+        "current_avg_score": curr_stats["avg_score"],
+        "previous_avg_score": prev_stats["avg_score"],
+        "score_delta_pct": _pct_delta(curr_stats["avg_score"], prev_stats["avg_score"]),
+        "used_all_time_fallback": used_all_time_fallback,
+    }
 
     total_posts = len(rows)
     tracked_count = len(tracked)
@@ -147,6 +259,8 @@ def build_analytics_summary(db_path: Optional[str] = None) -> Dict[str, Any]:
     }
 
     return {
+        "period": period_key,
+        "period_comparison": period_comparison,
         "totals": {
             "total_posts": total_posts,
             "tracked_posts": tracked_count,
@@ -744,21 +858,213 @@ def apply_report_feedback(
     }
 
 
-def run_daily_analytics_report(
+def evaluate_past_reports(db_path: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Closed-loop AI self-evaluation:
+    Grades past analytics reports' recommendations (genre boosts, decade boosts,
+    preferred visual templates, avoid lists) against subsequent real post metrics.
+    Persists `outcome_evaluation` on each evaluated report and returns a summary
+    of suggestion successes and failures to feed back into future AI analyses.
+    """
+    init_db(db_path)
+    all_rows = get_post_analytics_rows(limit=1000, db_path=db_path)
+    tracked = [r for r in all_rows if r.get("has_metrics") or int(r.get("views", 0)) > 0]
+    reports = get_analytics_reports(limit=30, db_path=db_path)
+
+    evaluated_count = 0
+    for rep in reports:
+        fw = rep.get("feedback_weights") or {}
+        if not fw:
+            continue
+        rep_ts = _parse_iso_dt(rep.get("created_at")) or _parse_iso_dt(rep.get("report_date"))
+        if rep_ts is None:
+            continue
+
+        before_posts = [p for p in tracked if (_post_timestamp(p) or rep_ts) <= rep_ts]
+        after_posts = [p for p in tracked if (_post_timestamp(p) or rep_ts) > rep_ts]
+        if not after_posts:
+            continue
+
+        before_stats = _window_stats(before_posts)
+        after_stats = _window_stats(after_posts)
+        baseline_score = before_stats["avg_score"] if before_stats["count"] > 0 else after_stats["avg_score"]
+        score_delta_pct = _pct_delta(after_stats["avg_score"], before_stats["avg_score"])
+        views_delta_pct = _pct_delta(after_stats["avg_views"], before_stats["avg_views"])
+
+        succeeded: List[str] = []
+        failed: List[str] = []
+
+        # 1. Evaluate boosted & reduced genres
+        for genre, w in (fw.get("preferred_genres") or {}).items():
+            g_posts = [p for p in after_posts if (p.get("genre") or "").strip().lower() == genre.strip().lower()]
+            if not g_posts:
+                continue
+            g_avg = _window_stats(g_posts)["avg_score"]
+            delta = _pct_delta(g_avg, baseline_score)
+            if w > 1.05:
+                if g_avg >= baseline_score * 1.02:
+                    succeeded.append(
+                        f"Boosting genre '{genre}' (x{w:.2f}) succeeded: {len(g_posts)} post(s) averaged score {g_avg} ({delta:+.1f}% vs baseline)"
+                        if delta is not None else
+                        f"Boosting genre '{genre}' (x{w:.2f}) succeeded: avg score {g_avg}"
+                    )
+                elif g_avg < baseline_score * 0.95:
+                    failed.append(
+                        f"Boosting genre '{genre}' (x{w:.2f}) underperformed: {len(g_posts)} post(s) averaged score {g_avg} ({delta:+.1f}% vs baseline)"
+                        if delta is not None else
+                        f"Boosting genre '{genre}' (x{w:.2f}) underperformed: avg score {g_avg}"
+                    )
+            elif w < 0.95:
+                if g_avg > baseline_score * 1.10:
+                    failed.append(
+                        f"Reducing genre '{genre}' (x{w:.2f}) was too conservative: subsequent posts scored {g_avg} (+{delta:.1f}%)"
+                        if delta is not None else
+                        f"Reducing genre '{genre}' (x{w:.2f}) was too conservative: avg score {g_avg}"
+                    )
+
+        # 2. Evaluate boosted decades
+        for dec, w in (fw.get("preferred_decades") or {}).items():
+            d_posts = [
+                p for p in after_posts
+                if p.get("year") and f"{(int(p['year']) // 10) * 10}s".lower() == dec.strip().lower()
+            ]
+            if not d_posts:
+                continue
+            d_avg = _window_stats(d_posts)["avg_score"]
+            delta = _pct_delta(d_avg, baseline_score)
+            if w > 1.05:
+                if d_avg >= baseline_score * 1.02:
+                    succeeded.append(
+                        f"Prioritizing {dec} (x{w:.2f}) succeeded: avg score {d_avg} ({delta:+.1f}% vs baseline)"
+                        if delta is not None else
+                        f"Prioritizing {dec} (x{w:.2f}) succeeded: avg score {d_avg}"
+                    )
+                elif d_avg < baseline_score * 0.95:
+                    failed.append(
+                        f"Prioritizing {dec} (x{w:.2f}) underperformed: avg score {d_avg} ({delta:+.1f}% vs baseline)"
+                        if delta is not None else
+                        f"Prioritizing {dec} (x{w:.2f}) underperformed: avg score {d_avg}"
+                    )
+
+        # 3. Evaluate preferred visual templates
+        pref_tpls = [t.strip().lower() for t in (fw.get("preferred_templates") or []) if t]
+        if pref_tpls:
+            t_posts = [p for p in after_posts if (p.get("template_used") or "").strip().lower() in pref_tpls]
+            if t_posts:
+                t_avg = _window_stats(t_posts)["avg_score"]
+                delta = _pct_delta(t_avg, baseline_score)
+                tpl_str = "/".join(pref_tpls[:2])
+                if t_avg >= baseline_score * 1.02:
+                    succeeded.append(
+                        f"Recommended style '{tpl_str}' succeeded: avg score {t_avg} ({delta:+.1f}% vs baseline)"
+                        if delta is not None else
+                        f"Recommended style '{tpl_str}' succeeded: avg score {t_avg}"
+                    )
+                elif t_avg < baseline_score * 0.95:
+                    failed.append(
+                        f"Recommended style '{tpl_str}' underperformed: avg score {t_avg} ({delta:+.1f}% vs baseline)"
+                        if delta is not None else
+                        f"Recommended style '{tpl_str}' underperformed: avg score {t_avg}"
+                    )
+
+        if score_delta_pct is not None and score_delta_pct >= 5.0 and len(succeeded) >= len(failed):
+            verdict = "improved"
+        elif score_delta_pct is not None and score_delta_pct <= -5.0 and len(failed) >= len(succeeded):
+            verdict = "regressed"
+        elif succeeded and not failed:
+            verdict = "improved"
+        elif failed and not succeeded:
+            verdict = "regressed"
+        else:
+            verdict = "mixed"
+
+        evaluation = {
+            "verdict": verdict,
+            "before_posts": before_stats["count"],
+            "after_posts": after_stats["count"],
+            "before_avg_score": before_stats["avg_score"],
+            "after_avg_score": after_stats["avg_score"],
+            "score_delta_pct": score_delta_pct,
+            "views_delta_pct": views_delta_pct,
+            "succeeded_suggestions": succeeded[:5],
+            "failed_suggestions": failed[:5],
+            "evaluated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        update_report_outcome_evaluation(rep["id"], evaluation, db_path=db_path)
+        evaluated_count += 1
+
+    return build_learning_summary(db_path=db_path, newly_evaluated=evaluated_count)
+
+
+def build_learning_summary(db_path: Optional[str] = None, newly_evaluated: int = 0) -> Dict[str, Any]:
+    """Compile a compact summary of past AI suggestion successes & failures for prompts & UI."""
+    evaluated_reports = get_evaluated_learning_history(limit=8, db_path=db_path)
+    recent_successes: List[str] = []
+    recent_failures: List[str] = []
+    history_entries: List[Dict[str, Any]] = []
+    improved_count = 0
+    regressed_count = 0
+
+    for rep in evaluated_reports:
+        ev = rep.get("outcome_evaluation") or {}
+        if not isinstance(ev, dict):
+            continue
+        verdict = ev.get("verdict", "mixed")
+        if verdict == "improved":
+            improved_count += 1
+        elif verdict == "regressed":
+            regressed_count += 1
+
+        for s in ev.get("succeeded_suggestions") or []:
+            if s not in recent_successes:
+                recent_successes.append(s)
+        for f in ev.get("failed_suggestions") or []:
+            if f not in recent_failures:
+                recent_failures.append(f)
+
+        history_entries.append({
+            "report_id": rep["id"],
+            "report_date": rep.get("report_date"),
+            "period_type": rep.get("period_type") or "daily",
+            "verdict": verdict,
+            "score_delta_pct": ev.get("score_delta_pct"),
+            "views_delta_pct": ev.get("views_delta_pct"),
+            "after_posts": ev.get("after_posts", 0),
+            "succeeded": (ev.get("succeeded_suggestions") or [])[:3],
+            "failed": (ev.get("failed_suggestions") or [])[:3],
+        })
+
+    return {
+        "evaluated_reports": len(history_entries),
+        "newly_evaluated": newly_evaluated,
+        "improved_count": improved_count,
+        "regressed_count": regressed_count,
+        "recent_successes": recent_successes[:6],
+        "recent_failures": recent_failures[:6],
+        "history": history_entries[:6],
+    }
+
+
+def run_analytics_report(
+    period: str = "daily",
     sync_first: Optional[bool] = None,
     auto_apply_feedback: Optional[bool] = None,
     db_path: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Execute the full daily post analytics pipeline:
-      1. Optionally sync latest metrics from TikTok Studio (if enabled & cookies healthy)
-      2. Aggregate post metrics & breakdowns
-      3. Analyze with the local CPU-efficient LLM (Qwen3.5 2B via Ollama, with statistical fallback)
-      4. Persist the daily report and optionally activate feedback weights for future track selection
+    Execute a daily, weekly, or monthly post analytics pipeline:
+      1. Optionally sync latest metrics from TikTok Studio
+      2. Evaluate past AI reports against subsequent post performance (learning loop!)
+      3. Aggregate period-windowed metrics & period-over-period comparisons
+      4. Analyze with the local CPU-efficient LLM (fed with past suggestion wins & failures)
+      5. Persist the report with lessons_learned & optionally activate feedback weights
     """
+    period_key = period if period in ("daily", "weekly", "monthly") else "daily"
+    period_label = period_key.capitalize()
+
     def _prog(msg: str, pct: int) -> None:
-        logger.info("[Daily Analytics %d%%] %s", pct, msg)
+        logger.info("[%s Analytics %d%%] %s", period_label, pct, msg)
         if progress_cb:
             progress_cb(msg, pct)
 
@@ -783,21 +1089,32 @@ def run_daily_analytics_report(
             logger.warning("TikTok analytics sync skipped due to error: %s", exc)
             sync_result = {"ok": False, "synced": 0, "message": str(exc)}
 
-    _prog("Aggregating post performance metrics...", 35)
-    summary = build_analytics_summary(db_path=db_path)
+    _prog("Evaluating past AI suggestions against recent post outcomes...", 30)
+    learning_summary = evaluate_past_reports(db_path=db_path)
 
-    _prog("Running local CPU-efficient LLM analysis...", 55)
-    analysis = analyze_posts_with_llm(summary, db_path=db_path)
+    _prog(f"Aggregating {period_key} post performance metrics...", 45)
+    summary = build_analytics_summary(db_path=db_path, period=period_key)
 
-    _prog("Saving daily analytics report...", 90)
+    _prog(f"Running local CPU-efficient LLM ({period_key} analysis + learning loop)...", 60)
+    analysis = analyze_posts_with_llm(
+        summary,
+        db_path=db_path,
+        period=period_key,
+        learning_history=learning_summary,
+    )
+
+    _prog(f"Saving {period_key} analytics report...", 90)
     report_date = datetime.now().strftime("%Y-%m-%d")
     report_id = save_analytics_report(
         report_date=report_date,
+        period_type=period_key,
         model_used=analysis["model_used"],
         summary_markdown=analysis["summary_markdown"],
         top_posts=analysis["top_posts"],
         improvements=analysis["improvements"],
         feedback_weights=analysis["feedback_weights"],
+        period_comparison=summary.get("period_comparison"),
+        lessons_learned=analysis.get("lessons_learned") or [],
         posts_analyzed=summary["totals"]["tracked_posts"],
         elapsed_sec=analysis["elapsed_sec"],
         status=analysis["status"],
@@ -808,11 +1125,29 @@ def run_daily_analytics_report(
 
     report = get_analytics_report_by_id(report_id, db_path=db_path)
     _prog(
-        f"Daily report #{report_id} complete ({analysis['model_used']}, {analysis['elapsed_sec']}s).",
+        f"{period_label} report #{report_id} complete ({analysis['model_used']}, {analysis['elapsed_sec']}s).",
         100,
     )
     return {
         "ok": True,
+        "period": period_key,
         "report": report,
         "sync": sync_result,
+        "learning": learning_summary,
     }
+
+
+def run_daily_analytics_report(
+    sync_first: Optional[bool] = None,
+    auto_apply_feedback: Optional[bool] = None,
+    db_path: Optional[str] = None,
+    progress_cb: Optional[Callable[[str, int], None]] = None,
+) -> Dict[str, Any]:
+    """Backward-compatible wrapper for running a daily analytics report."""
+    return run_analytics_report(
+        period="daily",
+        sync_first=sync_first,
+        auto_apply_feedback=auto_apply_feedback,
+        db_path=db_path,
+        progress_cb=progress_cb,
+    )

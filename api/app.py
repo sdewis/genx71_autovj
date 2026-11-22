@@ -31,7 +31,8 @@ from core.db import (
 )
 from core.analytics import (
     build_analytics_summary, sync_tiktok_analytics, import_analytics_file,
-    run_daily_analytics_report, apply_report_feedback,
+    run_analytics_report, run_daily_analytics_report, apply_report_feedback,
+    build_learning_summary,
 )
 from core.llm_analyst import get_llm_health, ensure_model_pulled
 from core.charts import seed_charts_if_empty, load_new_chart_batch
@@ -184,6 +185,7 @@ class AnalyticsImportRequest(BaseModel):
 
 
 class AnalyticsRunRequest(BaseModel):
+    period: str = "daily"
     sync_first: Optional[bool] = None
     auto_apply_feedback: Optional[bool] = None
 
@@ -756,10 +758,13 @@ def api_render_without_tts(post_id: int):
 
 @app.get("/api/analytics/overview")
 def api_analytics_overview():
-    summary = build_analytics_summary()
-    reports = get_analytics_reports(limit=20)
+    summary = build_analytics_summary(period="daily")
+    weekly_summary = build_analytics_summary(period="weekly")
+    monthly_summary = build_analytics_summary(period="monthly")
+    reports = get_analytics_reports(limit=30)
     latest_report = reports[0] if reports else None
     active_feedback = get_active_feedback_weights()
+    learning_summary = build_learning_summary()
     llm_health = get_llm_health()
     settings = get_all_settings()
     return {
@@ -767,6 +772,11 @@ def api_analytics_overview():
         "top_posts": summary["top_posts"],
         "breakdowns": summary["breakdowns"],
         "posts": summary["posts"],
+        "period_stats": {
+            "weekly": weekly_summary["period_comparison"],
+            "monthly": monthly_summary["period_comparison"],
+        },
+        "learning": learning_summary,
         "latest_report": latest_report,
         "reports": reports,
         "active_feedback": active_feedback,
@@ -776,6 +786,8 @@ def api_analytics_overview():
         "config": {
             "analytics_report_enabled": settings.get("analytics_report_enabled", "true") == "true",
             "analytics_report_time": settings.get("analytics_report_time", "02:00"),
+            "analytics_weekly_enabled": settings.get("analytics_weekly_enabled", "true") == "true",
+            "analytics_monthly_enabled": settings.get("analytics_monthly_enabled", "true") == "true",
             "analytics_auto_sync": settings.get("analytics_auto_sync", "true") == "true",
             "analytics_feedback_enabled": settings.get("analytics_feedback_enabled", "true") == "true",
             "analytics_feedback_strength": settings.get("analytics_feedback_strength", "0.5"),
@@ -854,13 +866,14 @@ def api_sync_analytics():
 @app.post("/api/analytics/analyze")
 def api_run_analytics_report(req: Optional[AnalyticsRunRequest] = None):
     body = req or AnalyticsRunRequest()
+    period = body.period if body.period in ("daily", "weekly", "monthly") else "daily"
     with analytics_lock:
         if analytics_state["running"]:
             raise HTTPException(status_code=409, detail="An analytics task is already running.")
         analytics_state["running"] = True
-        analytics_state["task"] = "analyze"
+        analytics_state["task"] = f"analyze:{period}"
         analytics_state["progress"] = 5
-        analytics_state["message"] = "Starting local LLM analytics report..."
+        analytics_state["message"] = f"Starting local LLM {period} analytics report..."
         analytics_state["error"] = None
 
     def _worker():
@@ -869,7 +882,8 @@ def api_run_analytics_report(req: Optional[AnalyticsRunRequest] = None):
             analytics_state["progress"] = pct
 
         try:
-            res = run_daily_analytics_report(
+            res = run_analytics_report(
+                period=period,
                 sync_first=body.sync_first,
                 auto_apply_feedback=body.auto_apply_feedback,
                 progress_cb=_cb,
@@ -885,7 +899,7 @@ def api_run_analytics_report(req: Optional[AnalyticsRunRequest] = None):
             analytics_state["running"] = False
 
     threading.Thread(target=_worker, daemon=True).start()
-    return {"started": True, "task": "analyze"}
+    return {"started": True, "task": f"analyze:{period}", "period": period}
 
 
 @app.get("/api/analytics/analyze/status")
@@ -894,8 +908,8 @@ def api_analytics_job_status():
 
 
 @app.get("/api/analytics/reports")
-def api_analytics_reports(limit: int = Query(30, le=100)):
-    return {"reports": get_analytics_reports(limit=limit)}
+def api_analytics_reports(limit: int = Query(30, le=100), period: Optional[str] = None):
+    return {"reports": get_analytics_reports(limit=limit, period_type=period)}
 
 
 @app.post("/api/analytics/reports/{report_id}/apply")

@@ -293,10 +293,25 @@ def build_statistical_analysis(analytics_payload: Dict[str, Any]) -> Dict[str, A
     top_region = breakdowns.get("by_region", [{}])[0].get("label") if breakdowns.get("by_region") else None
     best_post = top_rows[0] if top_rows else None
 
+    period_key = str(analytics_payload.get("period") or "daily")
+    comp_info = analytics_payload.get("period_comparison") or {}
+    learning = analytics_payload.get("learning_history") or {}
+
     summary_parts = [
-        f"Analyzed **{tracked} tracked post(s)** totaling **{total_views:,} views** "
+        f"**{period_key.capitalize()} review:** Analyzed **{tracked} tracked post(s)** totaling **{total_views:,} views** "
         f"(avg engagement **{avg_eng:.2f}%**, avg completion **{avg_comp:.1f}%**)."
     ]
+    if period_key in ("weekly", "monthly") and comp_info.get("previous_posts", 0) > 0:
+        v_delta = comp_info.get("views_delta_pct")
+        s_delta = comp_info.get("score_delta_pct")
+        cmp_label = "week-over-week" if period_key == "weekly" else "month-over-month"
+        delta_bits = []
+        if v_delta is not None:
+            delta_bits.append(f"avg views **{v_delta:+.1f}%**")
+        if s_delta is not None:
+            delta_bits.append(f"avg score **{s_delta:+.1f}%**")
+        if delta_bits:
+            summary_parts.append(f"Compared to the prior period ({cmp_label}): {', '.join(delta_bits)}.")
     if best_post:
         summary_parts.append(
             f"Top performer: **{best_post['artist']} — {best_post['title']} ({best_post['year']})** "
@@ -333,6 +348,27 @@ def build_statistical_analysis(analytics_payload: Dict[str, Any]) -> Dict[str, A
     if not improvements:
         improvements.append("Continue posting consistently across styles and eras to build deeper trend confidence.")
 
+    # Incorporate past suggestion successes/failures into lessons_learned and dampen failed boosts
+    lessons_learned: List[str] = []
+    past_successes = learning.get("recent_successes") or []
+    past_failures = learning.get("recent_failures") or []
+    for s in past_successes[:3]:
+        lessons_learned.append(f"Confirmed win: {s}")
+    for f in past_failures[:3]:
+        lessons_learned.append(f"Course-correcting past miss: {f}")
+        # Dampen any genre weight explicitly called out as underperforming in recent failures
+        for g_name in list(genre_weights.keys()):
+            if f"'{g_name.lower()}'" in f.lower() and "underperformed" in f.lower():
+                genre_weights[g_name] = _clamp_weight(genre_weights[g_name] * 0.85, lo=0.65, hi=1.6)
+        for d_name in list(decade_weights.keys()):
+            if d_name.lower() in f.lower() and "underperformed" in f.lower():
+                decade_weights[d_name] = _clamp_weight(decade_weights[d_name] * 0.85, lo=0.65, hi=1.6)
+
+    if not lessons_learned and period_key in ("weekly", "monthly"):
+        lessons_learned.append(
+            "Baseline cycle established — future weekly/monthly runs will automatically grade these recommendations against subsequent posts."
+        )
+
     formatted_top = [
         {
             "post_id": r["post_id"],
@@ -349,13 +385,15 @@ def build_statistical_analysis(analytics_payload: Dict[str, Any]) -> Dict[str, A
 
     rationale = (
         f"Boosted {top_genre or 'top genres'} and {top_decade or 'leading decades'} "
-        f"based on {tracked} tracked post(s)."
+        f"based on {tracked} tracked post(s)"
+        + (f" and {len(past_successes)} win(s) / {len(past_failures)} correction(s) from prior reports." if (past_successes or past_failures) else ".")
     )
 
     return {
         "summary_markdown": " ".join(summary_parts),
         "top_posts": formatted_top,
         "improvements": improvements[:6],
+        "lessons_learned": lessons_learned[:6],
         "feedback_weights": sanitize_feedback_weights({
             "preferred_genres": genre_weights,
             "preferred_decades": decade_weights,
@@ -368,15 +406,32 @@ def build_statistical_analysis(analytics_payload: Dict[str, Any]) -> Dict[str, A
     }
 
 
-def _build_llm_prompt(analytics_payload: Dict[str, Any]) -> str:
+def _build_llm_prompt(
+    analytics_payload: Dict[str, Any],
+    period: str = "daily",
+    learning_history: Optional[Dict[str, Any]] = None,
+) -> str:
     """Build a compact, token-efficient prompt suited for 4K-context CPU local LLMs."""
     totals = analytics_payload.get("totals", {})
     breakdowns = analytics_payload.get("breakdowns", {})
     top_posts = analytics_payload.get("top_posts", [])[:8]
     bottom_posts = analytics_payload.get("bottom_posts", [])[:4]
+    period_comparison = analytics_payload.get("period_comparison") or {}
+    learning = learning_history or analytics_payload.get("learning_history") or {}
+
+    compact_learning = {
+        "evaluated_reports": learning.get("evaluated_reports", 0),
+        "improved_count": learning.get("improved_count", 0),
+        "regressed_count": learning.get("regressed_count", 0),
+        "past_suggestion_successes": (learning.get("recent_successes") or [])[:4],
+        "past_suggestion_failures": (learning.get("recent_failures") or [])[:4],
+    }
 
     compact_data = {
+        "period": period,
+        "period_comparison": period_comparison,
         "totals": totals,
+        "learning_history": compact_learning,
         "by_genre": breakdowns.get("by_genre", [])[:8],
         "by_decade": breakdowns.get("by_decade", []),
         "by_region": breakdowns.get("by_region", []),
@@ -419,13 +474,23 @@ def _build_llm_prompt(analytics_payload: Dict[str, Any]) -> str:
         ],
     }
 
+    period_focus = {
+        "daily": "Daily tactical review: spot immediate winners and quick wins for tomorrow's posts.",
+        "weekly": "Weekly strategic review (7-day window vs prior 7 days): evaluate week-over-week trends and grade last week's AI suggestions.",
+        "monthly": "Monthly strategic review (30-day window vs prior 30 days): identify durable audience shifts, fatigue, and long-term lessons from past AI successes & failures.",
+    }.get(period, "Daily tactical review.")
+
     return (
-        "You are a concise TikTok Music Channel Data Analyst for GenX71 AutoVJ (1978-1996 chart hits).\n"
+        "You are a concise, self-improving TikTok Music Channel Data Analyst for GenX71 AutoVJ (1978-1996 chart hits).\n"
+        f"Mode: {period_focus}\n"
+        "Review `learning_history` carefully: double down on past_suggestion_successes, do NOT repeat past_suggestion_failures, "
+        "and explain what you adjusted in `lessons_learned`.\n"
         "Analyze the JSON metrics below and return ONLY valid JSON with this exact schema:\n"
         "{\n"
-        '  "summary_markdown": "2-4 sentence executive summary highlighting what worked best and why",\n'
+        '  "summary_markdown": "2-4 sentence executive summary highlighting trends, what worked best, and period-over-period change",\n'
         '  "top_posts": [{"post_id": 1, "artist": "...", "title": "...", "reason": "short 1-sentence reason why it succeeded"}],\n'
         '  "improvements": ["3 to 5 specific, actionable suggestions to improve views, retention, and future track selection"],\n'
+        '  "lessons_learned": ["1 to 4 reflections on what past AI suggestions succeeded or failed and how weights were adapted"],\n'
         '  "feedback_weights": {\n'
         '    "preferred_genres": {"GenreName": 1.35},\n'
         '    "preferred_decades": {"1980s": 1.25, "1990s": 1.0},\n'
@@ -439,7 +504,7 @@ def _build_llm_prompt(analytics_payload: Dict[str, Any]) -> str:
         "Rules:\n"
         "- Weight values must be numbers between 0.5 and 2.0 (1.0 = neutral, >1.0 = boost, <1.0 = reduce).\n"
         "- recommended_wildcard_chance must be an integer 0-100.\n"
-        "- Base all conclusions strictly on the provided metrics.\n\n"
+        "- Base all conclusions strictly on the provided metrics and learning_history.\n\n"
         f"DATA:\n{json.dumps(compact_data, separators=(',', ':'))}"
     )
 
@@ -449,17 +514,25 @@ def analyze_posts_with_llm(
     db_path: Optional[str] = None,
     auto_pull: bool = True,
     timeout: int = 240,
+    period: str = "daily",
+    learning_history: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Run the local CPU-efficient LLM (Ollama) on post analytics data.
+    Incorporates period-over-period trends and closed-loop learning_history.
     Automatically falls back to deterministic statistical analysis if Ollama is offline.
     """
     t0 = time.monotonic()
-    totals = analytics_payload.get("totals", {})
+    enriched_payload = {
+        **analytics_payload,
+        "period": period or analytics_payload.get("period") or "daily",
+        "learning_history": learning_history or analytics_payload.get("learning_history") or {},
+    }
+    totals = enriched_payload.get("totals", {})
     tracked_posts = int(totals.get("tracked_posts", 0))
 
     if tracked_posts == 0:
-        fallback = build_statistical_analysis(analytics_payload)
+        fallback = build_statistical_analysis(enriched_payload)
         return {
             **fallback,
             "model_used": "statistical-baseline",
@@ -470,7 +543,7 @@ def analyze_posts_with_llm(
 
     base_url = resolve_llm_url(db_path=db_path)
     model = resolve_llm_model(db_path=db_path)
-    prompt = _build_llm_prompt(analytics_payload)
+    prompt = _build_llm_prompt(enriched_payload, period=enriched_payload["period"], learning_history=enriched_payload["learning_history"])
 
     try:
         health = get_llm_health(db_path=db_path)
@@ -483,7 +556,7 @@ def analyze_posts_with_llm(
             else:
                 raise RuntimeError(f"Model '{model}' is not installed in Ollama yet.")
 
-        logger.info("Running local LLM analytics with '%s' on %d tracked posts...", model, tracked_posts)
+        logger.info("Running local LLM %s analytics with '%s' on %d tracked posts...", enriched_payload["period"], model, tracked_posts)
         resp = requests.post(
             f"{base_url}/api/chat",
             json={
@@ -502,7 +575,7 @@ def analyze_posts_with_llm(
                 "options": {
                     "num_ctx": 4096,
                     "temperature": 0.3,
-                    "num_predict": 900,
+                    "num_predict": 1000,
                 },
             },
             timeout=timeout,
@@ -513,11 +586,11 @@ def analyze_posts_with_llm(
         parsed = _extract_json_object(raw_content)
 
         # Merge with statistical baseline to guarantee complete fields
-        baseline = build_statistical_analysis(analytics_payload)
+        baseline = build_statistical_analysis(enriched_payload)
         summary = str(parsed.get("summary_markdown") or "").strip() or baseline["summary_markdown"]
 
         raw_top = parsed.get("top_posts")
-        top_by_id = {p["post_id"]: p for p in analytics_payload.get("top_posts", [])}
+        top_by_id = {p["post_id"]: p for p in enriched_payload.get("top_posts", [])}
         cleaned_top: List[Dict[str, Any]] = []
         if isinstance(raw_top, list):
             for item in raw_top[:5]:
@@ -546,6 +619,14 @@ def analyze_posts_with_llm(
         if not cleaned_impr:
             cleaned_impr = baseline["improvements"]
 
+        raw_lessons = parsed.get("lessons_learned")
+        if isinstance(raw_lessons, list):
+            cleaned_lessons = [str(x).strip() for x in raw_lessons if str(x).strip()][:6]
+        else:
+            cleaned_lessons = []
+        if not cleaned_lessons:
+            cleaned_lessons = baseline.get("lessons_learned") or []
+
         weights = sanitize_feedback_weights(parsed.get("feedback_weights"))
         # Fill in any empty weight maps from statistical baseline so feedback is always rich
         base_w = baseline["feedback_weights"]
@@ -558,11 +639,12 @@ def analyze_posts_with_llm(
             weights["rationale"] = base_w.get("rationale", "")
 
         elapsed = round(time.monotonic() - t0, 2)
-        logger.info("Local LLM analytics report generated by '%s' in %.2fs", model, elapsed)
+        logger.info("Local LLM %s analytics report generated by '%s' in %.2fs", enriched_payload["period"], model, elapsed)
         return {
             "summary_markdown": summary,
             "top_posts": cleaned_top,
             "improvements": cleaned_impr,
+            "lessons_learned": cleaned_lessons,
             "feedback_weights": weights,
             "model_used": model,
             "status": "completed",
@@ -571,7 +653,7 @@ def analyze_posts_with_llm(
         }
     except Exception as exc:
         logger.warning("Local LLM analysis unavailable (%s); using statistical fallback.", exc)
-        fallback = build_statistical_analysis(analytics_payload)
+        fallback = build_statistical_analysis(enriched_payload)
         return {
             **fallback,
             "model_used": "statistical-fallback",

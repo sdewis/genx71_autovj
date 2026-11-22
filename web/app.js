@@ -1310,6 +1310,80 @@ function renderReportMarkdown(text) {
   return escHtml(text || "").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
 }
 
+let activeReportPeriodFilter = "all";
+
+function fmtDelta(val) {
+  if (val === null || val === undefined || Number.isNaN(Number(val))) {
+    return `<span class="delta-flat">—</span>`;
+  }
+  const n = Number(val);
+  const cls = n > 0 ? "delta-up" : n < 0 ? "delta-down" : "delta-flat";
+  const sign = n > 0 ? "+" : "";
+  return `<span class="${cls}">${sign}${n.toFixed(1)}%</span>`;
+}
+
+function renderPeriodTrends(periodStats) {
+  const box = document.getElementById("ana-period-trends");
+  if (!box) return;
+  const w = periodStats?.weekly || {};
+  const m = periodStats?.monthly || {};
+
+  const cards = [
+    { title: "📅 Weekly (Last 7d vs Prior 7d)", data: w },
+    { title: "🗓️ Monthly (Last 30d vs Prior 30d)", data: m },
+  ];
+
+  box.innerHTML = cards.map(({ title, data }) => `
+    <div class="period-trend-box">
+      <div class="period-trend-head">
+        <strong>${title}</strong>
+        <span class="badge">${data.current_posts || 0} posts</span>
+      </div>
+      <div class="metrics-row-stats" style="margin-top:2px;">
+        <span>Avg Views: <strong>${fmtNum(Math.round(data.current_avg_views || 0))}</strong> (${fmtDelta(data.views_delta_pct)})</span>
+        <span>Avg Eng: <strong>${data.current_avg_engagement || 0}%</strong> (${fmtDelta(data.engagement_delta_pct)})</span>
+        <span>Avg Score: <strong>${data.current_avg_score || 0}</strong> (${fmtDelta(data.score_delta_pct)})</span>
+      </div>
+    </div>
+  `).join("");
+}
+
+function renderLearningLedger(learning) {
+  const badge = document.getElementById("ana-learning-badge");
+  const ledger = document.getElementById("ana-learning-ledger");
+  if (!ledger) return;
+
+  const evalCount = learning?.evaluated_reports || 0;
+  const improved = learning?.improved_count || 0;
+  const regressed = learning?.regressed_count || 0;
+  if (badge) {
+    badge.textContent = evalCount
+      ? `${evalCount} evaluated • ${improved} improved / ${regressed} corrected`
+      : "0 evaluated yet";
+    badge.className = `badge ${improved > 0 ? "badge-posted" : ""}`;
+  }
+
+  const wins = learning?.recent_successes || [];
+  const misses = learning?.recent_failures || [];
+  if (!wins.length && !misses.length) {
+    ledger.innerHTML = `<p class="muted">As you run weekly &amp; monthly analyses after publishing new posts, the AI automatically grades its past suggestions (successes vs. failures) and feeds those lessons back into future analyses.</p>`;
+    return;
+  }
+
+  ledger.innerHTML = `
+    <div class="learning-cols">
+      <div class="learning-box learning-wins">
+        <strong>✅ Suggestion Successes (${wins.length})</strong>
+        ${wins.length ? `<ul>${wins.map((w) => `<li>${escHtml(w)}</li>`).join("")}</ul>` : `<p class="muted" style="margin-top:4px;">No confirmed wins recorded yet.</p>`}
+      </div>
+      <div class="learning-box learning-misses">
+        <strong>⚠️ Suggestion Failures &amp; Corrections (${misses.length})</strong>
+        ${misses.length ? `<ul>${misses.map((f) => `<li>${escHtml(f)}</li>`).join("")}</ul>` : `<p class="muted" style="margin-top:4px;">No underperforming suggestions detected.</p>`}
+      </div>
+    </div>
+  `;
+}
+
 function renderAnalyticsReport(report) {
   const metaEl = document.getElementById("ana-report-meta");
   const bodyEl = document.getElementById("ana-report-body");
@@ -1317,13 +1391,16 @@ function renderAnalyticsReport(report) {
 
   if (!report) {
     metaEl.textContent = "";
-    bodyEl.innerHTML = `<p class="muted">Run an AI report or wait for the scheduled 2:00 AM analysis to view top posts, improvement suggestions, and track-selection feedback.</p>`;
+    bodyEl.innerHTML = `<p class="muted">Run a Daily, Weekly, or Monthly AI report (or wait for the scheduled 2:00 AM analysis) to view top posts, improvement suggestions, lessons learned, and track-selection feedback.</p>`;
     return;
   }
 
+  const periodTag = (report.period_type || "daily").toUpperCase();
   const appliedTag = report.applied_to_feedback ? " • 🎯 Active Feedback" : "";
   const statusTag = report.status === "fallback" ? " (Statistical Fallback)" : "";
-  metaEl.innerHTML = `Report <strong>#${report.id}</strong> • ${escHtml(report.report_date)} • Model: <code>${escHtml(report.model_used)}</code>${escHtml(statusTag)} • ${report.posts_analyzed || 0} posts • ${report.elapsed_sec || 0}s${escHtml(appliedTag)}`;
+  const outcome = report.outcome_evaluation;
+  const verdictTag = outcome && outcome.verdict ? ` • Outcome: ${outcome.verdict.toUpperCase()}` : "";
+  metaEl.innerHTML = `<span class="badge">${escHtml(periodTag)}</span> Report <strong>#${report.id}</strong> • ${escHtml(report.report_date)} • Model: <code>${escHtml(report.model_used)}</code>${escHtml(statusTag)} • ${report.posts_analyzed || 0} posts • ${report.elapsed_sec || 0}s${escHtml(appliedTag)}${escHtml(verdictTag)}`;
 
   const topHtml = (report.top_posts || []).length
     ? `
@@ -1348,6 +1425,31 @@ function renderAnalyticsReport(report) {
         <ul class="report-list">
           ${report.improvements.map((tip) => `<li>${escHtml(tip)}</li>`).join("")}
         </ul>
+      </div>
+    `
+    : "";
+
+  const lessonsHtml = (report.lessons_learned || []).length
+    ? `
+      <div>
+        <div class="report-section-title">🔁 AI Lessons Learned (Self-Feedback Loop)</div>
+        <ul class="report-list">
+          ${report.lessons_learned.map((l) => `<li>${escHtml(l)}</li>`).join("")}
+        </ul>
+      </div>
+    `
+    : "";
+
+  const outcomeHtml = outcome
+    ? `
+      <div>
+        <div class="report-section-title">🧪 Measured Outcome of This Report's Advice</div>
+        <div class="report-summary-box">
+          Verdict: <strong>${escHtml((outcome.verdict || "mixed").toUpperCase())}</strong> across ${outcome.after_posts || 0} subsequent post(s)
+          (Score: ${fmtDelta(outcome.score_delta_pct)} • Avg Views: ${fmtDelta(outcome.views_delta_pct)}).
+          ${(outcome.succeeded_suggestions || []).length ? `<div style="margin-top:6px;">✅ ${outcome.succeeded_suggestions.map(escHtml).join(" · ")}</div>` : ""}
+          ${(outcome.failed_suggestions || []).length ? `<div style="margin-top:4px;">⚠️ ${outcome.failed_suggestions.map(escHtml).join(" · ")}</div>` : ""}
+        </div>
       </div>
     `
     : "";
@@ -1390,6 +1492,8 @@ function renderAnalyticsReport(report) {
     <div class="report-summary-box">${renderReportMarkdown(report.summary_markdown)}</div>
     ${topHtml}
     ${imprHtml}
+    ${lessonsHtml}
+    ${outcomeHtml}
     ${feedbackHtml}
   `;
 }
@@ -1525,6 +1629,10 @@ async function loadAnalytics() {
     }
     const repEnabled = document.getElementById("ana-report-enabled");
     if (repEnabled) repEnabled.checked = cfg.analytics_report_enabled !== false;
+    const weeklyEnabled = document.getElementById("ana-weekly-enabled");
+    if (weeklyEnabled) weeklyEnabled.checked = cfg.analytics_weekly_enabled !== false;
+    const monthlyEnabled = document.getElementById("ana-monthly-enabled");
+    if (monthlyEnabled) monthlyEnabled.checked = cfg.analytics_monthly_enabled !== false;
     const autoSync = document.getElementById("ana-auto-sync");
     if (autoSync) autoSync.checked = cfg.analytics_auto_sync !== false;
     const fbEnabled = document.getElementById("ana-feedback-enabled");
@@ -1535,18 +1643,11 @@ async function loadAnalytics() {
     if (strSlider) strSlider.value = String(strengthPct);
     if (strVal) strVal.textContent = String(strengthPct);
 
+    renderPeriodTrends(data.period_stats || {});
+    renderLearningLedger(data.learning || {});
+
     cachedAnalyticsReports = data.reports || [];
-    const sel = document.getElementById("ana-report-select");
-    if (sel) {
-      if (!cachedAnalyticsReports.length) {
-        sel.innerHTML = `<option value="">No reports yet</option>`;
-      } else {
-        sel.innerHTML = cachedAnalyticsReports.map((r) =>
-          `<option value="${r.id}">${escHtml(r.report_date)} — #${r.id} (${escHtml(r.model_used)})</option>`
-        ).join("");
-      }
-    }
-    renderAnalyticsReport(data.latest_report || null);
+    refreshReportSelectForFilter(activeReportPeriodFilter);
     renderBreakdowns(data.breakdowns || {});
     renderAnalyticsPosts(data.posts || []);
 
@@ -1556,6 +1657,29 @@ async function loadAnalytics() {
   } catch (err) {
     console.error("Failed to load analytics overview", err);
   }
+}
+
+function refreshReportSelectForFilter(period) {
+  activeReportPeriodFilter = period || "all";
+  document.querySelectorAll(".period-filter-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.period === activeReportPeriodFilter);
+  });
+
+  const filtered = activeReportPeriodFilter === "all"
+    ? cachedAnalyticsReports
+    : cachedAnalyticsReports.filter((r) => (r.period_type || "daily") === activeReportPeriodFilter);
+
+  const sel = document.getElementById("ana-report-select");
+  if (sel) {
+    if (!filtered.length) {
+      sel.innerHTML = `<option value="">No ${activeReportPeriodFilter === "all" ? "" : activeReportPeriodFilter + " "}reports yet</option>`;
+    } else {
+      sel.innerHTML = filtered.map((r) =>
+        `<option value="${r.id}">[${escHtml((r.period_type || "daily").toUpperCase())}] ${escHtml(r.report_date)} — #${r.id} (${escHtml(r.model_used)})</option>`
+      ).join("");
+    }
+  }
+  renderAnalyticsReport(filtered[0] || null);
 }
 
 function startAnalyticsPolling() {
@@ -1589,6 +1713,12 @@ document.getElementById("ana-feedback-strength")?.addEventListener("input", (e) 
   if (el) el.textContent = e.target.value;
 });
 
+document.querySelectorAll(".period-filter-btn").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    refreshReportSelectForFilter(btn.dataset.period || "all");
+  });
+});
+
 document.getElementById("ana-report-select")?.addEventListener("change", (e) => {
   const id = Number(e.target.value);
   const found = cachedAnalyticsReports.find((r) => r.id === id);
@@ -1601,6 +1731,8 @@ document.getElementById("btn-save-analytics-cfg")?.addEventListener("click", asy
     settings: {
       analytics_report_enabled: document.getElementById("ana-report-enabled")?.checked ? "true" : "false",
       analytics_report_time: document.getElementById("ana-report-time")?.value || "02:00",
+      analytics_weekly_enabled: document.getElementById("ana-weekly-enabled")?.checked ? "true" : "false",
+      analytics_monthly_enabled: document.getElementById("ana-monthly-enabled")?.checked ? "true" : "false",
       analytics_auto_sync: document.getElementById("ana-auto-sync")?.checked ? "true" : "false",
       analytics_feedback_enabled: document.getElementById("ana-feedback-enabled")?.checked ? "true" : "false",
       analytics_feedback_strength: strength,
@@ -1613,24 +1745,29 @@ document.getElementById("btn-save-analytics-cfg")?.addEventListener("click", asy
     body: JSON.stringify(payload),
   });
   if (res.ok) {
-    alert("Analytics & daily AI report schedule saved!");
+    alert("Analytics & daily/weekly/monthly AI schedule saved!");
     loadAnalytics();
   }
 });
 
-document.getElementById("btn-run-analytics")?.addEventListener("click", async () => {
+async function triggerAnalyticsReport(period) {
   const res = await fetch("/api/analytics/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sync_first: false }),
+    body: JSON.stringify({ period, sync_first: false }),
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    alert(data.detail || "Could not start AI analytics report.");
+    alert(data.detail || `Could not start ${period} AI analytics report.`);
     return;
   }
+  activeReportPeriodFilter = period;
   startAnalyticsPolling();
-});
+}
+
+document.getElementById("btn-run-analytics")?.addEventListener("click", () => triggerAnalyticsReport("daily"));
+document.getElementById("btn-run-weekly")?.addEventListener("click", () => triggerAnalyticsReport("weekly"));
+document.getElementById("btn-run-monthly")?.addEventListener("click", () => triggerAnalyticsReport("monthly"));
 
 document.getElementById("btn-sync-analytics")?.addEventListener("click", async () => {
   const res = await fetch("/api/analytics/sync", { method: "POST" });
