@@ -302,13 +302,22 @@ def synthesize_hook_audio(
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     url = (worker_url or get_tts_worker_url(db_path=db_path)).rstrip("/")
+    is_uk = (region or "").strip().lower() == "uk"
+    # XTTS-v2's English prior leans American; tighter sampling + full 30s speaker
+    # conditioning prevents British voices from drifting toward an American accent.
     payload = {
         "text": text,
         "speaker_wavs": [c["path"] for c in clips],
         "output_path": os.path.abspath(output_path),
         "language": "en",
         "speed": float(speed),
-        "temperature": 0.72,
+        "temperature": 0.50 if is_uk else 0.65,
+        "top_p": 0.75 if is_uk else 0.82,
+        "top_k": 35 if is_uk else 45,
+        "repetition_penalty": 5.0,
+        "gpt_cond_len": 30,
+        "gpt_cond_chunk_len": 6,
+        "max_ref_length": 30,
     }
 
     try:

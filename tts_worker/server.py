@@ -95,7 +95,50 @@ class SynthesizeRequest(BaseModel):
     output_path: str
     language: str = "en"
     speed: float = 1.05
-    temperature: float = 0.72
+    temperature: float = 0.58
+    top_p: float = 0.78
+    top_k: int = 40
+    repetition_penalty: float = 5.0
+    gpt_cond_len: int = 30
+    gpt_cond_chunk_len: int = 6
+    max_ref_length: int = 30
+
+
+_latents_cache: dict = {}
+
+
+def _get_xtts_latents(xtts_model, valid_wavs: List[str], max_ref_length: int, gpt_cond_len: int, gpt_cond_chunk_len: int):
+    """Compute and cache XTTS-v2 speaker conditioning latents keyed by file paths + mtimes."""
+    key_files = tuple((p, os.path.getmtime(p), os.path.getsize(p)) for p in valid_wavs)
+    cache_key = (key_files, int(max_ref_length), int(gpt_cond_len), int(gpt_cond_chunk_len))
+    cached = _latents_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    latents = xtts_model.get_conditioning_latents(
+        audio_path=valid_wavs if len(valid_wavs) > 1 else valid_wavs[0],
+        max_ref_length=int(max_ref_length),
+        gpt_cond_len=int(gpt_cond_len),
+        gpt_cond_chunk_len=int(gpt_cond_chunk_len),
+        sound_norm_refs=True,
+    )
+    # Keep cache bounded (UK + US profiles)
+    if len(_latents_cache) >= 8:
+        _latents_cache.clear()
+    _latents_cache[cache_key] = latents
+    return latents
+
+
+def _write_pcm16_wav(path: str, wav_samples, sample_rate: int = 24000) -> None:
+    import numpy as np
+
+    arr = np.asarray(wav_samples, dtype=np.float32).squeeze()
+    pcm = (np.clip(arr, -1.0, 1.0) * 32767.0).astype(np.int16)
+    with wave.open(path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(int(sample_rate))
+        wf.writeframes(pcm.tobytes())
 
 
 @app.get("/health")
@@ -133,22 +176,47 @@ def synthesize(req: SynthesizeRequest):
         try:
             tts = _get_tts_model()
             logger.info(
-                "Synthesizing %d chars with %d reference clip(s) -> %s",
-                len(text), len(valid_wavs), req.output_path,
+                "Synthesizing %d chars with %d reference clip(s) (temp=%.2f, cond=%ds) -> %s",
+                len(text), len(valid_wavs), req.temperature, req.gpt_cond_len, req.output_path,
             )
-            speaker_arg = valid_wavs if len(valid_wavs) > 1 else valid_wavs[0]
-            kwargs = {
-                "text": text,
-                "speaker_wav": speaker_arg,
-                "language": req.language or "en",
-                "file_path": raw_tmp,
-                "split_sentences": True,
-            }
-            # Pass speed if supported by installed coqui-tts version
-            try:
-                tts.tts_to_file(**kwargs, speed=float(req.speed))
-            except TypeError:
-                tts.tts_to_file(**kwargs)
+
+            xtts_model = getattr(getattr(tts, "synthesizer", None), "tts_model", None)
+            if xtts_model is not None and hasattr(xtts_model, "get_conditioning_latents") and hasattr(xtts_model, "inference"):
+                gpt_cond_latent, speaker_embedding = _get_xtts_latents(
+                    xtts_model,
+                    valid_wavs,
+                    max_ref_length=req.max_ref_length,
+                    gpt_cond_len=req.gpt_cond_len,
+                    gpt_cond_chunk_len=req.gpt_cond_chunk_len,
+                )
+                out = xtts_model.inference(
+                    text=text,
+                    language=req.language or "en",
+                    gpt_cond_latent=gpt_cond_latent,
+                    speaker_embedding=speaker_embedding,
+                    temperature=float(req.temperature),
+                    top_p=float(req.top_p),
+                    top_k=int(req.top_k),
+                    repetition_penalty=float(req.repetition_penalty),
+                    speed=float(req.speed),
+                    enable_text_splitting=(len(text) > 180),
+                )
+                sr = getattr(getattr(xtts_model, "config", None), "audio", None)
+                out_sr = getattr(sr, "output_sample_rate", 24000) if sr is not None else 24000
+                _write_pcm16_wav(raw_tmp, out["wav"], sample_rate=out_sr)
+            else:
+                speaker_arg = valid_wavs if len(valid_wavs) > 1 else valid_wavs[0]
+                kwargs = {
+                    "text": text,
+                    "speaker_wav": speaker_arg,
+                    "language": req.language or "en",
+                    "file_path": raw_tmp,
+                    "split_sentences": len(text) > 180,
+                }
+                try:
+                    tts.tts_to_file(**kwargs, speed=float(req.speed))
+                except TypeError:
+                    tts.tts_to_file(**kwargs)
 
             duration = _postprocess_wav(raw_tmp, req.output_path)
             elapsed = round(time.monotonic() - t0, 2)

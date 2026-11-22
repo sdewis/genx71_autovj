@@ -559,7 +559,7 @@ def api_delete_voice_sample(region: str, filename: str):
 def api_test_voice(req: TTSTestRequest):
     region = (req.region or "uk").strip().lower()
     sample_text = (req.text or "").strip() or (
-        "Oh, I bet this takes you right back to 1985! Turn this one all the way up on Gen X seventy-one!"
+        "Right then, I bet this one takes you straight back to 1985! Turn it up on Gen X seventy-one, what a brilliant tune!"
         if region == "uk"
         else "Where were you in 1985 when you heard this first? Turn it up on Gen X seventy-one!"
     )
