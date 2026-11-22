@@ -403,17 +403,44 @@ def render_tiktok_video(
     rms_envelope: List[float],
     duration: float,
     output_path: str,
-    template: str = "vinyl",
+    template: str = "hifi",
     watermark_path: str = DEFAULT_WATERMARK_PATH,
-    watermark_opacity: float = 0.40,
+    watermark_opacity: float = 0.65,
     facts: Optional[List[str]] = None,
+    audio_features: Optional[Dict[str, Any]] = None,
+    use_browser: bool = True,
 ) -> str:
     """
-    Render a sleek 1080x1920 9:16 MP4 video with the selected template,
-    beat-reactive visualizer, chart badge, 3 fading track facts,
-    and randomly placed spin-fading Seany GenX watermark.
+    Render a 1080x1920 9:16 MP4 video using the Chromium Style Pack renderer
+    (hifi, vhs, neon, riso, kinetic, cassette + legacy vinyl/cd/retro),
+    with automatic fallback to the lightweight Python/Pillow renderer if
+    headless Chromium is unavailable.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    fact_schedule = compute_fact_schedule(facts, duration)
+
+    if use_browser:
+        try:
+            from core.browser_renderer import render_style_video
+            return render_style_video(
+                artist=artist,
+                title=title,
+                year=year,
+                chart_badge=chart_badge,
+                artwork_path=artwork_path,
+                audio_path=audio_path,
+                rms_envelope=rms_envelope,
+                duration=duration,
+                output_path=output_path,
+                template=template,
+                watermark_path=watermark_path,
+                watermark_opacity=watermark_opacity,
+                fact_schedule=fact_schedule,
+                audio_features=audio_features,
+            )
+        except Exception as e:
+            logger.warning(f"Chromium Style Pack renderer failed ({e}); falling back to Pillow renderer.")
+
     palette = extract_palette(artwork_path)
     accent = palette["accent"]
 

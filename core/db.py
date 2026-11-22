@@ -93,11 +93,11 @@ def init_db(db_path: Optional[str] = None) -> None:
             "daily_post_times": "12:30,19:15",
             "jitter_minutes": "30",
             "wildcard_chance": "25",
-            "default_template": "vinyl",
+            "default_template": "auto",
             "era_appropriate_template": "false",
             "auto_queue_on_generate": "false",
             "auto_publish": "false",  # Drafts first or direct publish
-            "watermark_opacity": "0.40",
+            "watermark_opacity": "0.65",
             "cookies_json": ""
         }
         for k, v in defaults.items():
@@ -417,10 +417,22 @@ def get_recent_posts(limit: int = 50, db_path: Optional[str] = None) -> List[Dic
     conn = get_db(db_path)
     cur = conn.execute("""
         SELECT * FROM posts 
-        ORDER BY created_at DESC 
+        ORDER BY created_at DESC, id DESC 
         LIMIT ?
     """, (limit,))
     return [dict(r) for r in cur.fetchall()]
+
+
+def get_recent_templates(limit: int = 5, db_path: Optional[str] = None) -> List[str]:
+    """Return the most recently used template/style names (newest first)."""
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT template_used FROM posts
+        WHERE template_used IS NOT NULL AND template_used != ''
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+    """, (limit,))
+    return [row["template_used"] for row in cur.fetchall()]
 
 
 def get_post_by_id(post_id: int, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
