@@ -346,6 +346,25 @@ def extract_audio_features(wav_path: str, fps: int = 30, n_bands: int = 24) -> D
     }
 
 
+def _get_wav_duration_exact(wav_path: str) -> float:
+    """Return exact audio duration in seconds from WAV header (or ffprobe fallback)."""
+    try:
+        with wave.open(wav_path, "rb") as wf:
+            sr = wf.getframerate() or 44100
+            return wf.getnframes() / float(sr)
+    except Exception:
+        out = subprocess.check_output(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                wav_path,
+            ],
+            stderr=subprocess.PIPE,
+        ).decode("utf-8", errors="ignore").strip()
+        return float(out)
+
+
 def mix_radio_ramp_audio(
     raw_track_wav: str,
     hook_start_sec: float,
@@ -355,22 +374,21 @@ def mix_radio_ramp_audio(
 ) -> Dict[str, float]:
     """
     Classic Radio-DJ 'Talk Up the Post' audio mix:
-      - Backs up start_sec by tts_duration so the full-volume track hook hits right
-        where it normally would as soon as the DJ finishes speaking.
-      - Plays the pre-roll track ducked (~-13 dB) with a warm low-pass filter (1850 Hz)
-        that crossfades seamlessly into crisp 100% full-range stereo right as TTS ends.
+      - Backs up start_sec by (tts_duration + post_tts_breath) so the full-volume
+        track hook hits right after the DJ finishes speaking.
+      - Keeps the pre-roll track ducked (~-14 dB) with a warm low-pass filter (1850 Hz)
+        for the ENTIRE TTS duration + a 0.15s breath, and ONLY THEN crossfades smoothly
+        (0.45s) into crisp 100% full-range stereo.
       - Targets up to ~58.0s total (strictly <= 58.5s, safely below TikTok's 60s limit).
       - Falls back cleanly to ducking the opening seconds if source is a 30s preview
         or hook_start_sec < tts_duration.
     """
-    raw_samples, raw_sr = _load_wav_mono(raw_track_wav)
-    raw_dur = len(raw_samples) / float(raw_sr or 44100)
+    raw_dur = _get_wav_duration_exact(raw_track_wav)
+    tts_dur = max(0.5, _get_wav_duration_exact(tts_wav_path))
+    post_tts_breath = 0.15
 
-    tts_samples, tts_sr = _load_wav_mono(tts_wav_path)
-    tts_dur = max(0.5, len(tts_samples) / float(tts_sr or 44100))
-
-    # Back up start_sec by tts_dur so full volume lands on hook_start_sec
-    pre_roll_start = max(0.0, hook_start_sec - tts_dur)
+    # Back up start_sec by tts_dur + breath so full-volume swell begins right after speech ends
+    pre_roll_start = max(0.0, hook_start_sec - (tts_dur + post_tts_breath))
     avail_dur = max(1.0, raw_dur - pre_roll_start)
     desired_dur = min(MAX_CLIP_DURATION, max(MIN_CLIP_DURATION, float(target_total_duration)))
     raw_clip_dur = min(avail_dur, desired_dur)
@@ -388,9 +406,11 @@ def mix_radio_ramp_audio(
         pad_filter = f",apad=whole_dur={out_dur:.2f}"
 
     fade_out_start = max(0.0, raw_clip_dur - 1.2)
-    ramp_end = min(tts_dur, max(0.6, out_dur - 1.5))
-    xfade = min(0.45, max(0.15, ramp_end * 0.15))
-    main_trim_start = max(0.0, ramp_end - xfade)
+    # Keep bed fully ducked until tts_dur + post_tts_breath, then crossfade up over xfade seconds
+    hold_end = min(tts_dur + post_tts_breath, max(0.6, out_dur - 2.0))
+    xfade = min(0.45, max(0.20, (out_dur - hold_end) * 0.25))
+    pre_trim_end = min(out_dur - 0.5, hold_end + xfade)
+    main_trim_start = max(0.0, pre_trim_end - xfade)
 
     filter_complex = (
         f"[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
@@ -398,8 +418,8 @@ def mix_radio_ramp_audio(
         f"afade=t=out:st={fade_out_start:.2f}:d=1.2,"
         f"loudnorm=I=-14:TP=-1.5:LRA=11{pad_filter},"
         f"asplit=2[m_pre][m_main];"
-        f"[m_pre]atrim=0:{ramp_end:.3f},asetpts=PTS-STARTPTS,"
-        f"lowpass=f=1850:poles=2,volume=-13dB[bed_pre];"
+        f"[m_pre]atrim=0:{pre_trim_end:.3f},asetpts=PTS-STARTPTS,"
+        f"lowpass=f=1850:poles=2,volume=-14dB[bed_pre];"
         f"[m_main]atrim={main_trim_start:.3f},asetpts=PTS-STARTPTS[bed_main];"
         f"[bed_pre][bed_main]acrossfade=d={xfade:.3f}:c1=tri:c2=tri[bed];"
         f"[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
@@ -426,10 +446,12 @@ def mix_radio_ramp_audio(
         stderr=subprocess.PIPE,
     )
 
-    final_samples, final_sr = _load_wav_mono(out_wav_path)
+    final_dur = _get_wav_duration_exact(out_wav_path)
     return {
-        "duration": round(len(final_samples) / float(final_sr or 44100), 2),
+        "duration": round(final_dur, 2),
         "tts_duration": round(tts_dur, 2),
+        "ramp_start": round(main_trim_start, 2),
+        "ramp_end": round(pre_trim_end, 2),
         "pre_roll_start": round(pre_roll_start, 2),
         "hook_start": round(hook_start_sec, 2),
     }
@@ -506,8 +528,7 @@ def prepare_track_audio(
     tts_duration = 0.0
     if has_tts:
         # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp
-        tts_samples, tts_sr = _load_wav_mono(tts_audio_path)
-        est_tts_dur = max(0.5, len(tts_samples) / float(tts_sr or 44100))
+        est_tts_dur = max(0.5, _get_wav_duration_exact(tts_audio_path))
         desired_total = float(target_total_duration or TARGET_TTS_TOTAL_DURATION)
         main_target = max(MIN_CLIP_DURATION, min(MAX_CLIP_DURATION - est_tts_dur, desired_total - est_tts_dur))
         hook_start, _ = find_intelligent_clip_window(
