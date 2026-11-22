@@ -12,7 +12,26 @@ services:
       - TZ=${TZ:-Europe/London}
       - HOST=0.0.0.0
       - PORT=8710
+      - TTS_WORKER_URL=http://tts-worker:8711
     volumes:
       - ./data:/app/data
       - ./output:/app/output
       - ./cache:/app/cache
+
+  tts-worker:
+    build: ./tts_worker
+    image: genx71-tts-worker:latest
+    container_name: genx71-tts-worker
+    restart: unless-stopped
+    init: true
+    environment:
+      - TZ=${TZ:-Europe/London}
+      - TTS_HOST=0.0.0.0
+      - TTS_PORT=8711
+      - COQUI_TOS_AGREED=1
+      - OMP_NUM_THREADS=${TTS_CPU_THREADS:-4}
+    volumes:
+      - ./data:/app/data
+      - ./cache:/app/cache
+      - ./data/tts_models:/root/.local/share/tts
+

@@ -9,7 +9,7 @@
   <title>GenX71 AutoVJ Studio</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/logo.png" type="image/png" />
-  <link rel="stylesheet" href="/static/style.css?v=2.8" />
+  <link rel="stylesheet" href="/static/style.css?v=2.9" />
 </head>
 <body>
   <header class="topbar">
@@ -72,6 +72,20 @@
             <input type="checkbox" id="gen-auto-queue" />
             <span>Auto-queue on generate <span class="muted">(automatically add rendered tracks to Queue)</span></span>
           </label>
+          <label class="checkbox-label" style="margin-top: 4px;">
+            <input type="checkbox" id="gen-tts-enabled" />
+            <span>🎙️ Voice Hook TTS <span class="muted">(cloned DJ intro + ~58s radio ramp, queues as TTS pending)</span></span>
+          </label>
+        </div>
+
+        <div id="gen-tts-options" class="form-row hidden" style="margin-top: 8px;">
+          <label for="gen-voice-region">DJ Voice Profile</label>
+          <select id="gen-voice-region">
+            <option value="">Auto (🇬🇧 UK for UK tracks / 🇺🇸 US for US tracks)</option>
+            <option value="uk">🇬🇧 UK British Voice</option>
+            <option value="us">🇺🇸 US American Voice</option>
+          </select>
+          <input type="text" id="gen-custom-hook" placeholder="Optional: Custom DJ hook line (leave blank for era-specific auto hook)" style="margin-top: 6px;" />
         </div>
 
         <div class="btn-group">
@@ -226,11 +240,54 @@
         </label>
 
         <label class="checkbox-label">
+          <input type="checkbox" id="set-tts-enabled" /> 🎙️ Enable Voice Hook TTS by default (uses UK/US voice profiles)
+        </label>
+
+        <label class="checkbox-label">
           <input type="checkbox" id="set-auto-publish" /> Auto-Publish Directly (uncheck to save as TikTok Drafts)
         </label>
 
         <button type="submit" class="btn btn-primary">Save Schedule &amp; Settings</button>
       </form>
+
+      <div class="card form-stack" style="margin-top: 16px;">
+        <div class="voice-profile-header">
+          <h3>🎙️ Voice Hook &amp; Regional TTS Studio</h3>
+          <span id="tts-worker-pill" class="pill pill-off">TTS Worker: --</span>
+        </div>
+        <p class="muted">Upload 1–3 clean 10–30s voice clips (WAV/MP3/M4A) per accent. US chart tracks automatically use your <strong>US</strong> voice if uploaded (falling back to <strong>UK</strong>).</p>
+
+        <div class="voice-profiles-grid">
+          <div class="voice-profile-box">
+            <div class="voice-profile-header">
+              <strong>🇬🇧 UK British Voice</strong>
+              <span id="voice-uk-badge" class="badge">0 clips</span>
+            </div>
+            <input type="file" id="voice-uk-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm" class="sr-only" />
+            <div class="section-actions">
+              <label for="voice-uk-input" class="btn btn-secondary btn-small" style="cursor:pointer;">+ Upload UK Clip</label>
+              <button type="button" id="btn-test-uk" class="btn btn-small" onclick="testVoiceProfile('uk')">🔊 Test UK</button>
+            </div>
+            <div id="voice-uk-list" class="list-stack"></div>
+          </div>
+
+          <div class="voice-profile-box">
+            <div class="voice-profile-header">
+              <strong>🇺🇸 US American Voice</strong>
+              <span id="voice-us-badge" class="badge">0 clips</span>
+            </div>
+            <input type="file" id="voice-us-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm" class="sr-only" />
+            <div class="section-actions">
+              <label for="voice-us-input" class="btn btn-secondary btn-small" style="cursor:pointer;">+ Upload US Clip</label>
+              <button type="button" id="btn-test-us" class="btn btn-small" onclick="testVoiceProfile('us')">🔊 Test US</button>
+            </div>
+            <div id="voice-us-list" class="list-stack"></div>
+          </div>
+        </div>
+
+        <p id="tts-voice-msg" class="muted"></p>
+        <audio id="tts-test-audio" controls class="hidden" style="width:100%; margin-top:4px;"></audio>
+      </div>
 
       <div class="card form-stack" style="margin-top: 16px;">
         <h3>TikTok Session Cookies</h3>
@@ -283,6 +340,6 @@
     </button>
   </nav>
 
-  <script src="/static/app.js?v=2.8"></script>
+  <script src="/static/app.js?v=2.9"></script>
 </body>
 </html>

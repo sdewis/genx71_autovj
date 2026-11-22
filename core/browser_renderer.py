@@ -89,6 +89,7 @@ def _build_scene_payload(
     fact_schedule: List[Dict[str, Any]],
     watermark_path: Optional[str],
     watermark_opacity: float,
+    hook_overlay: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     style_id, media_variant = resolve_style_and_variant(template, year)
     palette = extract_palette(artwork_path)
@@ -122,6 +123,7 @@ def _build_scene_payload(
         "watermark_opacity": float(watermark_opacity),
         "fact_schedule": fact_schedule,
         "audio": audio_payload,
+        "hook": hook_overlay if isinstance(hook_overlay, dict) and hook_overlay.get("text") else None,
     }
 
 
@@ -140,6 +142,7 @@ def render_style_video(
     watermark_opacity: float = 0.65,
     fact_schedule: Optional[List[Dict[str, Any]]] = None,
     audio_features: Optional[Dict[str, Any]] = None,
+    hook_overlay: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Render a 1080x1920 9:16 MP4 video using Headless Chromium + studio_template.html + FFmpeg.
@@ -160,6 +163,7 @@ def render_style_video(
         fact_schedule=fact_schedule or [],
         watermark_path=watermark_path,
         watermark_opacity=watermark_opacity,
+        hook_overlay=hook_overlay,
     )
 
     total_frames = max(1, int(duration * FPS))

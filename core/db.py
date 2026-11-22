@@ -82,10 +82,21 @@ def init_db(db_path: Optional[str] = None) -> None:
         if "facts_json" not in cols:
             conn.execute("ALTER TABLE tracks ADD COLUMN facts_json TEXT")
 
-        # Safe migration for existing databases missing queue_position on posts
+        # Safe migrations for existing databases on posts
         post_cols = {row["name"] for row in conn.execute("PRAGMA table_info(posts)").fetchall()}
-        if "queue_position" not in post_cols:
-            conn.execute("ALTER TABLE posts ADD COLUMN queue_position INTEGER")
+        post_migrations = {
+            "queue_position": "INTEGER",
+            "hook_text": "TEXT",
+            "hook_template_id": "TEXT",
+            "voice_region": "TEXT",
+            "tts_audio_path": "TEXT",
+            "tts_enabled": "INTEGER DEFAULT 0",
+            "auto_queue": "INTEGER DEFAULT 0",
+            "publish_after_render": "INTEGER DEFAULT 0",
+        }
+        for col_name, col_type in post_migrations.items():
+            if col_name not in post_cols:
+                conn.execute(f"ALTER TABLE posts ADD COLUMN {col_name} {col_type}")
 
         # Default settings if not already set
         defaults = {
@@ -98,10 +109,14 @@ def init_db(db_path: Optional[str] = None) -> None:
             "auto_queue_on_generate": "false",
             "auto_publish": "false",  # Drafts first or direct publish
             "watermark_opacity": "0.65",
-            "cookies_json": ""
+            "cookies_json": "",
+            "tts_enabled": "false",
+            "tts_speed": "1.05",
+            "tts_worker_url": "",
         }
         for k, v in defaults.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
 
 
 # --- Track Management ---
@@ -181,7 +196,7 @@ def is_track_posted(artist: str, title: str, db_path: Optional[str] = None) -> b
     row = conn.execute("""
         SELECT id FROM posts 
         WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?)
-        AND status IN ('posted', 'rendered', 'scheduled', 'draft')
+        AND status IN ('posted', 'rendered', 'scheduled', 'draft', 'tts_pending', 'rendering')
     """, (artist.strip(), title.strip())).fetchone()
     return row is not None
 
@@ -203,7 +218,7 @@ def get_available_tracks(is_wildcard: Optional[bool] = None, db_path: Optional[s
     query = """
         SELECT t.* FROM tracks t
         WHERE t.id NOT IN (
-            SELECT DISTINCT track_id FROM posts WHERE track_id IS NOT NULL AND status IN ('posted', 'rendered', 'scheduled', 'draft')
+            SELECT DISTINCT track_id FROM posts WHERE track_id IS NOT NULL AND status IN ('posted', 'rendered', 'scheduled', 'draft', 'tts_pending', 'rendering')
         )
         AND NOT EXISTS (
             SELECT 1 FROM blacklist b
@@ -250,20 +265,29 @@ def record_post(track_id: Optional[int], artist: str, title: str, year: int,
                 chart_info: str = "", template_used: str = "vinyl",
                 video_path: Optional[str] = None, audio_url: Optional[str] = None,
                 artwork_path: Optional[str] = None, status: str = "rendered",
-                scheduled_for: Optional[datetime] = None, db_path: Optional[str] = None) -> int:
+                scheduled_for: Optional[datetime] = None,
+                hook_text: Optional[str] = None, hook_template_id: Optional[str] = None,
+                voice_region: Optional[str] = None, tts_audio_path: Optional[str] = None,
+                tts_enabled: int = 0, auto_queue: int = 0, publish_after_render: int = 0,
+                db_path: Optional[str] = None) -> int:
     conn = get_db(db_path)
     with conn:
         cur = conn.execute("""
             INSERT INTO posts (
                 track_id, artist, title, year, chart_info, template_used,
-                video_path, audio_url, artwork_path, status, scheduled_for
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                video_path, audio_url, artwork_path, status, scheduled_for,
+                hook_text, hook_template_id, voice_region, tts_audio_path,
+                tts_enabled, auto_queue, publish_after_render
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             track_id, artist.strip(), title.strip(), year, chart_info, template_used,
             video_path, audio_url, artwork_path, status,
-            scheduled_for.isoformat() if scheduled_for else None
+            scheduled_for.isoformat() if scheduled_for else None,
+            hook_text, hook_template_id, voice_region, tts_audio_path,
+            int(bool(tts_enabled)), int(bool(auto_queue)), int(bool(publish_after_render)),
         ))
         return cur.lastrowid
+
 
 
 def _compact_queue_positions(conn: sqlite3.Connection) -> None:
@@ -439,6 +463,49 @@ def get_post_by_id(post_id: int, db_path: Optional[str] = None) -> Optional[Dict
     conn = get_db(db_path)
     row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
     return dict(row) if row else None
+
+
+_ALLOWED_POST_UPDATE_FIELDS = {
+    "template_used", "video_path", "audio_url", "artwork_path", "status",
+    "error_message", "hook_text", "hook_template_id", "voice_region",
+    "tts_audio_path", "tts_enabled", "auto_queue", "publish_after_render",
+}
+
+
+def update_post_fields(post_id: int, db_path: Optional[str] = None, **fields: Any) -> bool:
+    clean = {k: v for k, v in fields.items() if k in _ALLOWED_POST_UPDATE_FIELDS}
+    if not clean:
+        return False
+    conn = get_db(db_path)
+    cols_sql = ", ".join(f"{k} = ?" for k in clean.keys())
+    vals = list(clean.values()) + [post_id]
+    with conn:
+        cur = conn.execute(f"UPDATE posts SET {cols_sql} WHERE id = ?", vals)
+        return cur.rowcount > 0
+
+
+def get_recent_hook_templates(limit: int = 12, db_path: Optional[str] = None) -> List[str]:
+    """Return the most recently used DJ hook template IDs (newest first)."""
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT hook_template_id FROM posts
+        WHERE hook_template_id IS NOT NULL AND hook_template_id != '' AND hook_template_id != 'custom'
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+    """, (limit,))
+    return [row["hook_template_id"] for row in cur.fetchall()]
+
+
+def get_pending_tts_posts(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return posts waiting for async TTS generation / rendering (oldest first)."""
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT * FROM posts
+        WHERE status IN ('tts_pending', 'rendering')
+        ORDER BY id ASC
+    """)
+    return [dict(r) for r in cur.fetchall()]
+
 
 
 # --- Settings Store ---

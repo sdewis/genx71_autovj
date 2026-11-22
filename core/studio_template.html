@@ -709,7 +709,7 @@
       ctx.textBaseline = "middle";
       ctx.font = `700 22px ${FONT_MONO}`;
       ctx.fillStyle = rgbStr(brighten(accent, 1.3), 0.95);
-      ctx.fillText(`TRACK TRIVIA  •  0${fact.slot.index + 1} / 0${fact.slot.total}`, fx + 44, fy + 38);
+      ctx.fillText("FACTS", fx + 44, fy + 38);
 
       ctx.font = `500 33px ${FONT_SANS}`;
       ctx.fillStyle = "#f4f6ff";
@@ -885,7 +885,7 @@
         ctx.textBaseline = "middle";
         ctx.font = `700 23px ${FONT_MONO}`;
         ctx.fillStyle = "#00f0ff";
-        ctx.fillText(`VH1 POP-UP FACT [${fact.slot.index + 1}/${fact.slot.total}]`, fx + 28, fy + 36);
+        ctx.fillText("FACTS", fx + 28, fy + 36);
         ctx.font = `600 32px ${FONT_SANS}`;
         ctx.fillStyle = "#ffffff";
         const lines = wrapText(ctx, fact.slot.text, fw - 56, 3);
@@ -1119,7 +1119,7 @@
       ctx.textBaseline = "middle";
       ctx.font = `700 22px ${FONT_MONO}`;
       ctx.fillStyle = rgbStr(pink, 1);
-      ctx.fillText(`★ FACT 0${fact.slot.index + 1} / 0${fact.slot.total} ★`, W / 2, fy + 34);
+      ctx.fillText("★ FACTS ★", W / 2, fy + 34);
 
       ctx.font = `500 33px ${FONT_SANS}`;
       ctx.fillStyle = "#f5f8ff";
@@ -1303,7 +1303,7 @@
       ctx.fillStyle = "#fcfaf3";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
-      ctx.fillText(`ZINE NOTE #${fact.slot.index + 1}/${fact.slot.total}`, -fw / 2 + 38, -fh / 2 + 34);
+      ctx.fillText("FACTS", -fw / 2 + 38, -fh / 2 + 34);
 
       ctx.font = `600 32px ${FONT_SANS}`;
       ctx.fillStyle = rgbStr(inkDark, 1);
@@ -1438,7 +1438,7 @@
       ctx.textBaseline = "middle";
       ctx.font = `900 22px ${FONT_MONO}`;
       ctx.fillStyle = rgbStr(primary, 1);
-      ctx.fillText(`0${fact.slot.index + 1} // 0${fact.slot.total}  TRACK FACT`, fx + 40, fy + 36);
+      ctx.fillText("FACTS", fx + 40, fy + 36);
 
       ctx.font = `700 33px ${FONT_SANS}`;
       ctx.fillStyle = "#0b0c12";
@@ -1755,7 +1755,7 @@
       ctx.fillStyle = rgbStr(amber, 0.95);
       ctx.shadowColor = rgbStr(amber, 0.65);
       ctx.shadowBlur = 10;
-      ctx.fillText(`LINER NOTES  //  0${fact.slot.index + 1} OF 0${fact.slot.total}`, fx + 34, fy + 36);
+      ctx.fillText("FACTS", fx + 34, fy + 36);
       ctx.shadowBlur = 0;
 
       ctx.font = `500 32px ${FONT_SANS}`;
@@ -1769,6 +1769,160 @@
 
     drawStationBug(t, audio, "dark");
     drawFilmGrain(t, 0.16);
+  }
+
+  // --- Spoken DJ Hook Overlay ('ON AIR' badge + voice meter + timed captions) ---
+  function drawHookOverlay(t, audio) {
+    const hook = SCENE && SCENE.hook;
+    if (!hook || !hook.text || !hook.duration || hook.duration <= 0.2) return;
+
+    const dur = Number(hook.duration);
+    const fadeIn = 0.25;
+    const fadeOut = 0.4;
+    if (t < 0 || t > dur + fadeOut) return;
+
+    let alpha = 1.0;
+    if (t < fadeIn) alpha = smoothstep(t / fadeIn);
+    else if (t > dur) alpha = 1.0 - smoothstep((t - dur) / fadeOut);
+    if (alpha <= 0.005) return;
+
+    const accent = (SCENE.palette && SCENE.palette.accent) || [0, 240, 255];
+    const brightAccent = brighten(accent, 1.35);
+
+    // Voice amplitude for live radio meter
+    const vRmsArr = Array.isArray(hook.voice_rms) ? hook.voice_rms : [];
+    const vIdx = clamp(Math.floor(t * 30), 0, Math.max(0, vRmsArr.length - 1));
+    const vAmp = vRmsArr.length ? vRmsArr[vIdx] : (audio ? audio.rms : 0.45);
+
+    const fx = 76, fy = 1344, fw = 928, fh = 204;
+    const slideY = t < fadeIn ? (1 - easeOutCubic(t / fadeIn)) * 28 : 0;
+
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(0, slideY);
+
+    // Sleek broadcast card container
+    roundRectPath(ctx, fx, fy, fw, fh, 24);
+    ctx.fillStyle = "rgba(10, 12, 22, 0.88)";
+    ctx.fill();
+    ctx.strokeStyle = rgbStr(brightAccent, 0.85);
+    ctx.lineWidth = 2.8;
+    ctx.stroke();
+
+    // Top row: pulsing 'ON AIR' pill + mini voice meter
+    const pulse = 0.55 + 0.45 * Math.sin(t * 7.5);
+    const pillX = fx + 28, pillY = fy + 22, pillW = 152, pillH = 34;
+    roundRectPath(ctx, pillX, pillY, pillW, pillH, 17);
+    ctx.fillStyle = `rgba(255, 42, 85, ${0.22 + pulse * 0.16})`;
+    ctx.fill();
+    ctx.strokeStyle = `rgba(255, 65, 105, ${0.75 + pulse * 0.25})`;
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+
+    // Glowing red dot
+    ctx.beginPath();
+    ctx.arc(pillX + 20, pillY + pillH / 2, 6, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255, 60, 95, ${0.7 + pulse * 0.3})`;
+    ctx.shadowColor = "rgba(255, 40, 80, 0.9)";
+    ctx.shadowBlur = 10;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.font = `800 18px ${FONT_MONO}`;
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText("ON AIR", pillX + 36, pillY + pillH / 2 + 1);
+
+    // Mini 14-bar voice-reactive meter on top right of card
+    const nBars = 14;
+    const barW = 7, barGap = 5;
+    const meterW = nBars * barW + (nBars - 1) * barGap;
+    const meterX = fx + fw - 30 - meterW;
+    const meterMidY = pillY + pillH / 2;
+    for (let i = 0; i < nBars; i++) {
+      const dist = Math.abs(i - (nBars - 1) / 2) / (nBars / 2);
+      const shape = Math.max(0.25, 1.0 - dist * 0.65);
+      const wave = 0.45 + 0.55 * Math.abs(Math.sin(t * 14.0 + i * 0.9));
+      const bh = Math.max(4, Math.min(28, 4 + vAmp * 26 * shape * wave));
+      const bx = meterX + i * (barW + barGap);
+      roundRectPath(ctx, bx, meterMidY - bh / 2, barW, bh, 3);
+      ctx.fillStyle = rgbStr(brightAccent, 0.85);
+      ctx.fill();
+    }
+
+    // Word-by-word timed caption lines
+    const words = String(hook.text).trim().split(/\s+/).filter(Boolean);
+    const activeWordIdx = Math.min(words.length - 1, Math.floor(clamp(t / Math.max(0.1, dur), 0, 0.999) * words.length));
+
+    ctx.font = `700 34px ${FONT_SANS}`;
+    const maxLineW = fw - 64;
+    // Wrap words into lines keeping track of global word index
+    const lines = [];
+    let curLine = [];
+    let curW = 0;
+    const spaceW = ctx.measureText(" ").width;
+
+    for (let i = 0; i < words.length; i++) {
+      const wText = words[i];
+      const wW = ctx.measureText(wText).width;
+      if (curLine.length > 0 && curW + spaceW + wW > maxLineW) {
+        lines.push(curLine);
+        curLine = [{ text: wText, idx: i, width: wW }];
+        curW = wW;
+      } else {
+        curLine.push({ text: wText, idx: i, width: wW });
+        curW += (curLine.length > 1 ? spaceW : 0) + wW;
+      }
+    }
+    if (curLine.length > 0) lines.push(curLine);
+
+    // Show a sliding window of up to 3 lines centered on the active word
+    let activeLineIdx = 0;
+    for (let li = 0; li < lines.length; li++) {
+      if (lines[li].some((w) => w.idx === activeWordIdx)) {
+        activeLineIdx = li;
+        break;
+      }
+    }
+    const maxVisible = 3;
+    let startLine = Math.max(0, Math.min(lines.length - maxVisible, activeLineIdx - 1));
+    const visibleLines = lines.slice(startLine, startLine + maxVisible);
+
+    const lh = 42;
+    const blockH = visibleLines.length * lh;
+    const startY = fy + 68 + Math.max(0, (fh - 80 - blockH) / 2) + lh / 2;
+
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    for (let li = 0; li < visibleLines.length; li++) {
+      const ln = visibleLines[li];
+      const totalLineW = ln.reduce((acc, w, wi) => acc + w.width + (wi > 0 ? spaceW : 0), 0);
+      let cursorX = fx + (fw - totalLineW) / 2;
+      const ly = startY + li * lh;
+
+      for (let wi = 0; wi < ln.length; wi++) {
+        const w = ln[wi];
+        const isCurrent = w.idx === activeWordIdx;
+        const isSpoken = w.idx <= activeWordIdx;
+        if (isCurrent) {
+          ctx.fillStyle = rgbStr(brightAccent, 1.0);
+          ctx.shadowColor = rgbStr(brightAccent, 0.75);
+          ctx.shadowBlur = 12;
+        } else if (isSpoken) {
+          ctx.fillStyle = "#ffffff";
+          ctx.shadowBlur = 0;
+        } else {
+          ctx.fillStyle = "rgba(220, 226, 245, 0.58)";
+          ctx.shadowBlur = 0;
+        }
+        ctx.fillText(w.text, cursorX, ly);
+        ctx.shadowBlur = 0;
+        cursorX += w.width + spaceW;
+      }
+    }
+
+    ctx.restore();
   }
 
   // --- Global Render Dispatcher ---
@@ -1799,6 +1953,9 @@
     else if (style === "kinetic") renderKinetic(t, audio);
     else if (style === "cassette") renderCassette(t, audio);
     else renderHiFi(t, audio);
+
+    // Live 'ON AIR' spoken DJ hook captions during opening pre-roll
+    drawHookOverlay(t, audio);
 
     // Graceful 0.6s outro fade to black so clips loop/end cleanly
     const rem = SCENE.duration - t;

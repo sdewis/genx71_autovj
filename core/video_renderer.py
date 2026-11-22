@@ -274,7 +274,7 @@ def _render_fact_card(fact_text: str, index: int, total: int, accent: Tuple[int,
     font_label = _load_font(24, bold=True)
     font_fact = _load_font(34, bold=False)
 
-    label_text = f"FACT {index + 1}/{total}"
+    label_text = "FACTS"
     draw.text((FACT_CARD_W // 2, 28), label_text, fill=(accent[0], accent[1], accent[2], 245), font=font_label, anchor="mm")
 
     lines = _wrap_text(fact_text, font_fact, FACT_CARD_W - 60, draw, max_lines=3)
@@ -409,6 +409,7 @@ def render_tiktok_video(
     facts: Optional[List[str]] = None,
     audio_features: Optional[Dict[str, Any]] = None,
     use_browser: bool = True,
+    hook_overlay: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Render a 1080x1920 9:16 MP4 video using the Chromium Style Pack renderer
@@ -417,7 +418,9 @@ def render_tiktok_video(
     headless Chromium is unavailable.
     """
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    fact_schedule = compute_fact_schedule(facts, duration)
+    hook_dur = float(hook_overlay.get("duration", 0.0)) if isinstance(hook_overlay, dict) else 0.0
+    fact_start_margin = (hook_dur + 1.1) if hook_dur > 0.2 else 2.0
+    fact_schedule = compute_fact_schedule(facts, duration, start_margin=fact_start_margin)
 
     if use_browser:
         try:
@@ -437,6 +440,7 @@ def render_tiktok_video(
                 watermark_opacity=watermark_opacity,
                 fact_schedule=fact_schedule,
                 audio_features=audio_features,
+                hook_overlay=hook_overlay,
             )
         except Exception as e:
             logger.warning(f"Chromium Style Pack renderer failed ({e}); falling back to Pillow renderer.")

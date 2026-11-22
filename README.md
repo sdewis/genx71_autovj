@@ -11,6 +11,7 @@ Automated 1978–1996 GenX Chart Hit TikTok Video Studio, 24/7 Background Schedu
   - `cd`: 3D CD Jewel Case with glossy reflection
   - `retro`: Glassmorphic Audiophile Card with progress bar
   - Beat-reactive spectrum visualizer, chart peak badge, and TikTok safe-zone **Seany GenX** watermark (`genxlogofinal.png`).
+- **Regional Voice Hook TTS (`core/tts.py`, `core/hooks.py`, `tts_worker/`)**: CPU-only zero-shot voice cloning sidecar (Coqui XTTS-v2) supporting **UK** & **US** voice profiles (auto-routed by track chart region), 30+ era-specific upbeat GenX DJ hook templates, **"talk up the post"** radio-ramp audio mixing (targeting ~58s total), live `ON AIR` captions, and async `TTS pending` queue statuses in the Web GUI.
 - **Stealth TikTok Poster (`core/tiktok_poster.py`)**: Playwright + `playwright-stealth` using your browser `sessionid` cookies, human-like typing/delays, and Drafts or Direct Publish support.
 - **24/7 Daemon with Jitter (`daemon.py`)**: `APScheduler` service with randomized Gaussian time fluctuation (`+/-` configurable minutes) to avoid bot-like posting intervals.
 - **Samsung S24 Ultra PWA & Linux UI (`web/`, `api/app.py`)**: Mobile-first AMOLED dark interface installable as a standalone app on your S24 Ultra.
