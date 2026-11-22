@@ -21,6 +21,14 @@ Automated 1978–1996 GenX Chart Hit TikTok Video Studio, 24/7 Background Schedu
 ### Option 1: Docker (Recommended)
 
 ```bash
+./start.sh            # Checks whether genx71-autovj or tts-worker need rebuilding, builds only what changed, and starts/restarts the stack
+./start.sh --check    # Dry-run check only (no build or restart)
+./start.sh --pull     # git pull, rebuild if needed, and restart
+```
+
+Or directly via Compose:
+
+```bash
 docker compose up -d --build
 ```
 
