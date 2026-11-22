@@ -16,10 +16,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install CPU-only PyTorch first to keep image size reasonable without CUDA bloat
+# Install CPU-only PyTorch, torchaudio, and torchcodec (required for audio IO on PyTorch >= 2.9)
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
-       torch torchaudio
+       torch torchaudio torchcodec
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
