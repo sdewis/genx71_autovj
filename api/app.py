@@ -25,8 +25,15 @@ from core.db import (
     get_blacklist, get_all_settings, set_setting, get_setting, get_post_by_id,
     update_post_status, update_post_fields, is_track_posted, is_blacklisted,
     queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue,
-    delete_post, get_track_batches, get_tracks_by_batch
+    delete_post, get_track_batches, get_tracks_by_batch,
+    upsert_post_analytics, get_analytics_reports, get_latest_analytics_report,
+    get_active_feedback_weights,
 )
+from core.analytics import (
+    build_analytics_summary, sync_tiktok_analytics, import_analytics_file,
+    run_daily_analytics_report, apply_report_feedback,
+)
+from core.llm_analyst import get_llm_health, ensure_model_pulled
 from core.charts import seed_charts_if_empty, load_new_chart_batch
 from core.pipeline import (
     generate_post_video, enqueue_tts_post, process_pending_post, TTSJobWorker
@@ -74,6 +81,17 @@ publish_state: Dict[str, Any] = {
     "error": None
 }
 publish_lock = threading.Lock()
+
+# Live Analytics sync / LLM report job state
+analytics_state: Dict[str, Any] = {
+    "running": False,
+    "task": None,
+    "progress": 0,
+    "message": "Idle",
+    "last_report_id": None,
+    "error": None,
+}
+analytics_lock = threading.Lock()
 
 
 @asynccontextmanager
@@ -149,6 +167,35 @@ class QueueReorderRequest(BaseModel):
     post_ids: List[int]
 
 
+class PostAnalyticsUpdateRequest(BaseModel):
+    views: int = 0
+    likes: int = 0
+    comments: int = 0
+    shares: int = 0
+    saves: int = 0
+    avg_watch_time_sec: float = 0.0
+    completion_rate: float = 0.0
+    tiktok_url: Optional[str] = None
+
+
+class AnalyticsImportRequest(BaseModel):
+    filename: str
+    content: str
+
+
+class AnalyticsRunRequest(BaseModel):
+    sync_first: Optional[bool] = None
+    auto_apply_feedback: Optional[bool] = None
+
+
+class ApplyFeedbackRequest(BaseModel):
+    apply_wildcard: bool = True
+
+
+class LLMPullRequest(BaseModel):
+    model: Optional[str] = None
+
+
 # --- API Endpoints ---
 
 @app.get("/api/status")
@@ -165,6 +212,7 @@ def api_status():
     return {
         "daemon_running": daemon.running,
         "next_scheduled_run": daemon.next_run_info,
+        "next_analytics_run": daemon.next_analytics_run_info,
         "cookie_health": cookie_health,
         "stats": {
             "total_tracks": total_tracks,
@@ -177,6 +225,7 @@ def api_status():
         },
         "generation": gen_state,
         "publish": publish_state,
+        "analytics_job": analytics_state,
         "tts_queue": tts_worker.status(),
     }
 
@@ -552,7 +601,11 @@ def api_update_settings(req: SettingsUpdateRequest):
             continue
         set_setting(k, str(v))
     daemon.reschedule_next()
-    return {"ok": True, "next_scheduled_run": daemon.next_run_info}
+    return {
+        "ok": True,
+        "next_scheduled_run": daemon.next_run_info,
+        "next_analytics_run": daemon.next_analytics_run_info,
+    }
 
 
 @app.post("/api/cookies")
@@ -697,6 +750,198 @@ def api_render_without_tts(post_id: int):
 
     threading.Thread(target=_fallback_worker, daemon=True).start()
     return {"ok": True, "started": True, "post_id": post_id}
+
+
+# --- Post Analytics & Local LLM Daily Report Endpoints ---
+
+@app.get("/api/analytics/overview")
+def api_analytics_overview():
+    summary = build_analytics_summary()
+    reports = get_analytics_reports(limit=20)
+    latest_report = reports[0] if reports else None
+    active_feedback = get_active_feedback_weights()
+    llm_health = get_llm_health()
+    settings = get_all_settings()
+    return {
+        "totals": summary["totals"],
+        "top_posts": summary["top_posts"],
+        "breakdowns": summary["breakdowns"],
+        "posts": summary["posts"],
+        "latest_report": latest_report,
+        "reports": reports,
+        "active_feedback": active_feedback,
+        "llm": llm_health,
+        "next_analytics_run": daemon.next_analytics_run_info,
+        "analytics_job": analytics_state,
+        "config": {
+            "analytics_report_enabled": settings.get("analytics_report_enabled", "true") == "true",
+            "analytics_report_time": settings.get("analytics_report_time", "02:00"),
+            "analytics_auto_sync": settings.get("analytics_auto_sync", "true") == "true",
+            "analytics_feedback_enabled": settings.get("analytics_feedback_enabled", "true") == "true",
+            "analytics_feedback_strength": settings.get("analytics_feedback_strength", "0.5"),
+            "llm_model": settings.get("llm_model", "qwen3.5:2b"),
+        },
+    }
+
+
+@app.post("/api/analytics/posts/{post_id}")
+def api_update_post_analytics(post_id: int, req: PostAnalyticsUpdateRequest):
+    post = get_post_by_id(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    saved = upsert_post_analytics(
+        post_id=post_id,
+        views=req.views,
+        likes=req.likes,
+        comments=req.comments,
+        shares=req.shares,
+        saves=req.saves,
+        avg_watch_time_sec=req.avg_watch_time_sec,
+        completion_rate=req.completion_rate,
+        tiktok_url=req.tiktok_url,
+        source="manual",
+    )
+    return {"ok": True, "analytics": saved}
+
+
+@app.post("/api/analytics/import")
+def api_import_analytics(req: AnalyticsImportRequest):
+    raw_name = (req.filename or "").strip()
+    if not raw_name or "\x00" in raw_name:
+        raise HTTPException(status_code=400, detail="Invalid filename.")
+    if not (raw_name.lower().endswith(".csv") or raw_name.lower().endswith(".json")):
+        raise HTTPException(status_code=400, detail="Only .csv or .json analytics files are supported.")
+    try:
+        res = import_analytics_file(req.content, raw_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Import failed: {exc}")
+    return res
+
+
+@app.post("/api/analytics/sync")
+def api_sync_analytics():
+    with analytics_lock:
+        if analytics_state["running"]:
+            raise HTTPException(status_code=409, detail="An analytics task is already running.")
+        analytics_state["running"] = True
+        analytics_state["task"] = "sync"
+        analytics_state["progress"] = 5
+        analytics_state["message"] = "Starting TikTok Studio analytics sync..."
+        analytics_state["error"] = None
+
+    def _worker():
+        def _cb(msg: str, pct: int):
+            analytics_state["message"] = msg
+            analytics_state["progress"] = pct
+
+        try:
+            res = sync_tiktok_analytics(progress_cb=_cb)
+            analytics_state["message"] = res.get("message", "Sync complete.")
+            analytics_state["progress"] = 100
+            if not res.get("ok"):
+                analytics_state["error"] = res.get("message")
+        except Exception as exc:
+            logger.exception("TikTok analytics sync error")
+            analytics_state["error"] = str(exc)
+            analytics_state["message"] = f"Sync error: {exc}"
+        finally:
+            analytics_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"started": True, "task": "sync"}
+
+
+@app.post("/api/analytics/analyze")
+def api_run_analytics_report(req: Optional[AnalyticsRunRequest] = None):
+    body = req or AnalyticsRunRequest()
+    with analytics_lock:
+        if analytics_state["running"]:
+            raise HTTPException(status_code=409, detail="An analytics task is already running.")
+        analytics_state["running"] = True
+        analytics_state["task"] = "analyze"
+        analytics_state["progress"] = 5
+        analytics_state["message"] = "Starting local LLM analytics report..."
+        analytics_state["error"] = None
+
+    def _worker():
+        def _cb(msg: str, pct: int):
+            analytics_state["message"] = msg
+            analytics_state["progress"] = pct
+
+        try:
+            res = run_daily_analytics_report(
+                sync_first=body.sync_first,
+                auto_apply_feedback=body.auto_apply_feedback,
+                progress_cb=_cb,
+            )
+            rep = res.get("report") or {}
+            analytics_state["last_report_id"] = rep.get("id")
+            analytics_state["progress"] = 100
+        except Exception as exc:
+            logger.exception("Analytics LLM report error")
+            analytics_state["error"] = str(exc)
+            analytics_state["message"] = f"Analysis error: {exc}"
+        finally:
+            analytics_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"started": True, "task": "analyze"}
+
+
+@app.get("/api/analytics/analyze/status")
+def api_analytics_job_status():
+    return analytics_state
+
+
+@app.get("/api/analytics/reports")
+def api_analytics_reports(limit: int = Query(30, le=100)):
+    return {"reports": get_analytics_reports(limit=limit)}
+
+
+@app.post("/api/analytics/reports/{report_id}/apply")
+def api_apply_analytics_report(report_id: int, req: Optional[ApplyFeedbackRequest] = None):
+    body = req or ApplyFeedbackRequest()
+    try:
+        res = apply_report_feedback(report_id, apply_wildcard=body.apply_wildcard)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return res
+
+
+@app.get("/api/llm/status")
+def api_llm_status():
+    return get_llm_health()
+
+
+@app.post("/api/llm/pull")
+def api_llm_pull(req: Optional[LLMPullRequest] = None):
+    body = req or LLMPullRequest()
+    with analytics_lock:
+        if analytics_state["running"]:
+            raise HTTPException(status_code=409, detail="An analytics/LLM task is already running.")
+        analytics_state["running"] = True
+        analytics_state["task"] = "pull"
+        analytics_state["progress"] = 15
+        analytics_state["message"] = f"Pulling local LLM '{body.model or get_setting('llm_model', 'qwen3.5:2b')}'..."
+        analytics_state["error"] = None
+
+    def _worker():
+        try:
+            res = ensure_model_pulled(model=body.model)
+            if res.get("already_installed"):
+                analytics_state["message"] = f"Model '{res['model']}' is already installed and ready."
+            else:
+                analytics_state["message"] = f"Pulled '{res['model']}' in {res.get('elapsed_sec', 0)}s!"
+            analytics_state["progress"] = 100
+        except Exception as exc:
+            logger.exception("LLM model pull error")
+            analytics_state["error"] = str(exc)
+            analytics_state["message"] = f"Pull failed: {exc}"
+        finally:
+            analytics_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return {"started": True, "task": "pull"}
 
 
 # --- Static Files & PWA Routes ---

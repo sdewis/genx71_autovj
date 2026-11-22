@@ -32,6 +32,7 @@ class AutoVJDaemon:
         self.scheduler = BackgroundScheduler()
         self.running = False
         self.next_run_info = None
+        self.next_analytics_run_info = None
 
     def _compute_next_jittered_run(self) -> Optional[datetime]:
         enabled = get_setting("schedule_enabled", "true", db_path=self.db_path) == "true"
@@ -67,6 +68,58 @@ class AutoVJDaemon:
                     candidates.append(jittered_dt)
 
         return min(candidates) if candidates else None
+
+    def _compute_next_analytics_run(self) -> Optional[datetime]:
+        enabled = get_setting("analytics_report_enabled", "true", db_path=self.db_path) == "true"
+        if not enabled:
+            return None
+
+        raw_time = (get_setting("analytics_report_time", "02:00", db_path=self.db_path) or "02:00").strip()
+        try:
+            hh, mm = map(int, raw_time.split(":"))
+            if not (0 <= hh <= 23 and 0 <= mm <= 59):
+                raise ValueError("Out of range")
+        except Exception:
+            hh, mm = 2, 0
+
+        now = datetime.now()
+        candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if candidate <= now + timedelta(seconds=30):
+            candidate = candidate + timedelta(days=1)
+        return candidate
+
+    def _run_analytics_job(self):
+        logger.info("Triggered scheduled daily GenX71 post analytics LLM report.")
+        try:
+            from core.analytics import run_daily_analytics_report
+            res = run_daily_analytics_report(db_path=self.db_path)
+            rep = res.get("report") or {}
+            logger.info(
+                "Daily analytics report #%s finished (model=%s, posts=%s, status=%s)",
+                rep.get("id"), rep.get("model_used"), rep.get("posts_analyzed"), rep.get("status"),
+            )
+        except Exception as exc:
+            logger.error("Scheduled daily analytics report failed: %s", exc)
+        finally:
+            self.reschedule_analytics()
+
+    def reschedule_analytics(self):
+        if self.scheduler.get_job("daily_analytics_report"):
+            self.scheduler.remove_job("daily_analytics_report")
+
+        next_dt = self._compute_next_analytics_run()
+        if next_dt:
+            self.next_analytics_run_info = next_dt.isoformat()
+            logger.info("Next daily AI analytics report scheduled for: %s", self.next_analytics_run_info)
+            self.scheduler.add_job(
+                self._run_analytics_job,
+                trigger=DateTrigger(run_date=next_dt),
+                id="daily_analytics_report",
+                replace_existing=True,
+            )
+        else:
+            self.next_analytics_run_info = None
+            logger.info("Daily AI analytics reporting is disabled.")
 
     def _run_scheduled_job(self):
         logger.info("Triggered scheduled GenX71 AutoVJ generation & post job.")
@@ -125,6 +178,8 @@ class AutoVJDaemon:
         else:
             self.next_run_info = None
             logger.info("Automated scheduling is disabled.")
+
+        self.reschedule_analytics()
 
     def start(self):
         init_db(self.db_path)

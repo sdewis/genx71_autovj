@@ -73,9 +73,46 @@ def init_db(db_path: Optional[str] = None) -> None:
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS post_analytics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id INTEGER UNIQUE NOT NULL,
+            views INTEGER DEFAULT 0,
+            likes INTEGER DEFAULT 0,
+            comments INTEGER DEFAULT 0,
+            shares INTEGER DEFAULT 0,
+            saves INTEGER DEFAULT 0,
+            avg_watch_time_sec REAL DEFAULT 0.0,
+            completion_rate REAL DEFAULT 0.0,
+            engagement_rate REAL DEFAULT 0.0,
+            performance_score REAL DEFAULT 0.0,
+            tiktok_url TEXT,
+            source TEXT DEFAULT 'manual',
+            fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(post_id) REFERENCES posts(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS analytics_reports (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_date TEXT NOT NULL,
+            model_used TEXT NOT NULL,
+            summary_markdown TEXT NOT NULL,
+            top_posts_json TEXT,
+            improvements_json TEXT,
+            feedback_weights_json TEXT,
+            posts_analyzed INTEGER DEFAULT 0,
+            elapsed_sec REAL DEFAULT 0.0,
+            status TEXT NOT NULL DEFAULT 'completed',
+            error_message TEXT,
+            applied_to_feedback INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_tracks_artist_title ON tracks(artist, title);
         CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status);
         CREATE INDEX IF NOT EXISTS idx_posts_artist_title ON posts(artist, title);
+        CREATE INDEX IF NOT EXISTS idx_post_analytics_post_id ON post_analytics(post_id);
+        CREATE INDEX IF NOT EXISTS idx_analytics_reports_date ON analytics_reports(report_date DESC, id DESC);
         """)
 
         # Safe migrations for existing databases on tracks
@@ -117,6 +154,13 @@ def init_db(db_path: Optional[str] = None) -> None:
             "tts_enabled": "false",
             "tts_speed": "1.05",
             "tts_worker_url": "",
+            "analytics_report_enabled": "true",
+            "analytics_report_time": "02:00",
+            "analytics_auto_sync": "true",
+            "analytics_feedback_enabled": "true",
+            "analytics_feedback_strength": "0.5",
+            "llm_model": "qwen3.5:2b",
+            "llm_worker_url": "",
         }
         for k, v in defaults.items():
             conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -591,3 +635,250 @@ def get_all_settings(db_path: Optional[str] = None) -> Dict[str, str]:
     conn = get_db(db_path)
     cur = conn.execute("SELECT key, value FROM settings")
     return {row["key"]: row["value"] for row in cur.fetchall()}
+
+
+# --- Post Analytics & Daily AI Reports ---
+
+def _compute_analytics_scores(
+    views: int,
+    likes: int,
+    comments: int,
+    shares: int,
+    saves: int,
+    completion_rate: float = 0.0,
+) -> tuple:
+    """Compute weighted engagement rate (%) and composite performance score."""
+    import math
+
+    v = max(0, int(views or 0))
+    l = max(0, int(likes or 0))
+    c = max(0, int(comments or 0))
+    sh = max(0, int(shares or 0))
+    sv = max(0, int(saves or 0))
+    comp = max(0.0, min(100.0, float(completion_rate or 0.0)))
+
+    if v > 0:
+        weighted_eng = l + (c * 2.0) + (sh * 3.0) + (sv * 2.0)
+        engagement_rate = round((weighted_eng / float(v)) * 100.0, 2)
+    else:
+        engagement_rate = 0.0
+
+    # Composite score balancing reach (log-scaled views), engagement, and retention
+    reach_component = math.log10(v + 1) * 18.0 if v > 0 else 0.0
+    eng_component = min(engagement_rate, 40.0) * 1.4
+    comp_component = comp * 0.45
+    performance_score = round(reach_component + eng_component + comp_component, 2)
+    return engagement_rate, performance_score
+
+
+def upsert_post_analytics(
+    post_id: int,
+    views: int = 0,
+    likes: int = 0,
+    comments: int = 0,
+    shares: int = 0,
+    saves: int = 0,
+    avg_watch_time_sec: float = 0.0,
+    completion_rate: float = 0.0,
+    tiktok_url: Optional[str] = None,
+    source: str = "manual",
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Insert or update analytics metrics for an existing post."""
+    v = max(0, int(views or 0))
+    l = max(0, int(likes or 0))
+    c = max(0, int(comments or 0))
+    sh = max(0, int(shares or 0))
+    sv = max(0, int(saves or 0))
+    awt = max(0.0, float(avg_watch_time_sec or 0.0))
+    comp = max(0.0, min(100.0, float(completion_rate or 0.0)))
+    from datetime import timezone
+    eng_rate, perf_score = _compute_analytics_scores(v, l, c, sh, sv, comp)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    conn = get_db(db_path)
+    with conn:
+        conn.execute("""
+            INSERT INTO post_analytics (
+                post_id, views, likes, comments, shares, saves,
+                avg_watch_time_sec, completion_rate, engagement_rate,
+                performance_score, tiktok_url, source, fetched_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(post_id) DO UPDATE SET
+                views = excluded.views,
+                likes = excluded.likes,
+                comments = excluded.comments,
+                shares = excluded.shares,
+                saves = excluded.saves,
+                avg_watch_time_sec = excluded.avg_watch_time_sec,
+                completion_rate = excluded.completion_rate,
+                engagement_rate = excluded.engagement_rate,
+                performance_score = excluded.performance_score,
+                tiktok_url = COALESCE(excluded.tiktok_url, post_analytics.tiktok_url),
+                source = excluded.source,
+                updated_at = excluded.updated_at
+        """, (
+            post_id, v, l, c, sh, sv,
+            round(awt, 2), round(comp, 2), eng_rate, perf_score,
+            tiktok_url, source, now_iso, now_iso,
+        ))
+        row = conn.execute("SELECT * FROM post_analytics WHERE post_id = ?", (post_id,)).fetchone()
+        return dict(row) if row else {}
+
+
+def get_post_analytics_rows(limit: int = 200, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Return existing posts joined with their track metadata and analytics metrics."""
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT
+            p.id AS post_id,
+            p.track_id,
+            p.artist,
+            p.title,
+            p.year,
+            p.chart_info,
+            p.template_used,
+            p.status,
+            p.posted_at,
+            p.created_at,
+            p.tiktok_id,
+            p.tts_enabled,
+            p.voice_region,
+            p.hook_template_id,
+            COALESCE(t.genre, 'Pop/Rock') AS genre,
+            t.chart_peak,
+            COALESCE(t.chart_region, 'UK') AS chart_region,
+            COALESCE(t.is_wildcard, 0) AS is_wildcard,
+            CASE WHEN pa.id IS NOT NULL THEN 1 ELSE 0 END AS has_metrics,
+            COALESCE(pa.views, 0) AS views,
+            COALESCE(pa.likes, 0) AS likes,
+            COALESCE(pa.comments, 0) AS comments,
+            COALESCE(pa.shares, 0) AS shares,
+            COALESCE(pa.saves, 0) AS saves,
+            COALESCE(pa.avg_watch_time_sec, 0.0) AS avg_watch_time_sec,
+            COALESCE(pa.completion_rate, 0.0) AS completion_rate,
+            COALESCE(pa.engagement_rate, 0.0) AS engagement_rate,
+            COALESCE(pa.performance_score, 0.0) AS performance_score,
+            pa.tiktok_url,
+            pa.source AS analytics_source,
+            pa.updated_at AS analytics_updated_at
+        FROM posts p
+        LEFT JOIN tracks t ON t.id = p.track_id
+        LEFT JOIN post_analytics pa ON pa.post_id = p.id
+        ORDER BY COALESCE(pa.performance_score, 0.0) DESC, p.created_at DESC, p.id DESC
+        LIMIT ?
+    """, (limit,))
+    return [dict(r) for r in cur.fetchall()]
+
+
+def save_analytics_report(
+    report_date: str,
+    model_used: str,
+    summary_markdown: str,
+    top_posts: Optional[List[Dict[str, Any]]] = None,
+    improvements: Optional[List[str]] = None,
+    feedback_weights: Optional[Dict[str, Any]] = None,
+    posts_analyzed: int = 0,
+    elapsed_sec: float = 0.0,
+    status: str = "completed",
+    error_message: Optional[str] = None,
+    applied_to_feedback: bool = False,
+    db_path: Optional[str] = None,
+) -> int:
+    """Persist a daily AI analytics report."""
+    import json
+
+    conn = get_db(db_path)
+    with conn:
+        if applied_to_feedback:
+            conn.execute("UPDATE analytics_reports SET applied_to_feedback = 0")
+        cur = conn.execute("""
+            INSERT INTO analytics_reports (
+                report_date, model_used, summary_markdown,
+                top_posts_json, improvements_json, feedback_weights_json,
+                posts_analyzed, elapsed_sec, status, error_message, applied_to_feedback
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            report_date,
+            model_used,
+            summary_markdown,
+            json.dumps(top_posts or []),
+            json.dumps(improvements or []),
+            json.dumps(feedback_weights or {}),
+            int(posts_analyzed),
+            round(float(elapsed_sec or 0.0), 2),
+            status,
+            error_message,
+            1 if applied_to_feedback else 0,
+        ))
+        return cur.lastrowid
+
+
+def _hydrate_report_row(row: Optional[sqlite3.Row]) -> Optional[Dict[str, Any]]:
+    import json
+
+    if not row:
+        return None
+    d = dict(row)
+    for json_col, out_key, default in (
+        ("top_posts_json", "top_posts", []),
+        ("improvements_json", "improvements", []),
+        ("feedback_weights_json", "feedback_weights", {}),
+    ):
+        raw = d.get(json_col)
+        try:
+            d[out_key] = json.loads(raw) if raw else default
+        except Exception:
+            d[out_key] = default
+    return d
+
+
+def get_analytics_reports(limit: int = 30, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db(db_path)
+    cur = conn.execute("""
+        SELECT * FROM analytics_reports
+        ORDER BY id DESC
+        LIMIT ?
+    """, (limit,))
+    return [_hydrate_report_row(r) for r in cur.fetchall()]
+
+
+def get_analytics_report_by_id(report_id: int, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    conn = get_db(db_path)
+    row = conn.execute("SELECT * FROM analytics_reports WHERE id = ?", (report_id,)).fetchone()
+    return _hydrate_report_row(row)
+
+
+def get_latest_analytics_report(db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    conn = get_db(db_path)
+    row = conn.execute("SELECT * FROM analytics_reports ORDER BY id DESC LIMIT 1").fetchone()
+    return _hydrate_report_row(row)
+
+
+def mark_report_applied(report_id: int, db_path: Optional[str] = None) -> bool:
+    """Mark a specific report as the active feedback profile for future track selection."""
+    conn = get_db(db_path)
+    with conn:
+        exists = conn.execute("SELECT id FROM analytics_reports WHERE id = ?", (report_id,)).fetchone()
+        if not exists:
+            return False
+        conn.execute("UPDATE analytics_reports SET applied_to_feedback = 0")
+        conn.execute("UPDATE analytics_reports SET applied_to_feedback = 1 WHERE id = ?", (report_id,))
+        return True
+
+
+def get_active_feedback_weights(db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Return the active feedback weights dict from the applied (or latest) analytics report."""
+    conn = get_db(db_path)
+    row = conn.execute("""
+        SELECT * FROM analytics_reports
+        WHERE applied_to_feedback = 1 AND feedback_weights_json IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+    """).fetchone()
+    if not row:
+        return None
+    hydrated = _hydrate_report_row(row)
+    weights = hydrated.get("feedback_weights") if hydrated else None
+    return weights if isinstance(weights, dict) and weights else None
+

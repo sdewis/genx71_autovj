@@ -20,6 +20,7 @@ document.querySelectorAll(".nav-btn").forEach((btn) => {
 
     if (target === "queue") loadQueue();
     if (target === "posts") loadPosts();
+    if (target === "analytics") loadAnalytics();
     if (target === "tracks") loadTracks();
     if (target === "admin") { loadSettings(); loadBlacklist(); loadVoiceProfiles(); }
   });
@@ -1241,6 +1242,480 @@ window.testVoiceProfile = async (region) => {
     if (btn) btn.disabled = false;
   }
 };
+
+// --- Post Analytics & Local AI Analyst ---
+let analyticsPollTimer = null;
+let cachedAnalyticsReports = [];
+let cachedAnalyticsPosts = [];
+
+function escHtml(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function fmtNum(n) {
+  const num = Number(n) || 0;
+  if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
+  if (num >= 1_000) return `${(num / 1_000).toFixed(1)}K`;
+  return String(num);
+}
+
+function renderReportMarkdown(text) {
+  return escHtml(text || "").replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+}
+
+function renderAnalyticsReport(report) {
+  const metaEl = document.getElementById("ana-report-meta");
+  const bodyEl = document.getElementById("ana-report-body");
+  if (!metaEl || !bodyEl) return;
+
+  if (!report) {
+    metaEl.textContent = "";
+    bodyEl.innerHTML = `<p class="muted">Run an AI report or wait for the scheduled 2:00 AM analysis to view top posts, improvement suggestions, and track-selection feedback.</p>`;
+    return;
+  }
+
+  const appliedTag = report.applied_to_feedback ? " • 🎯 Active Feedback" : "";
+  const statusTag = report.status === "fallback" ? " (Statistical Fallback)" : "";
+  metaEl.innerHTML = `Report <strong>#${report.id}</strong> • ${escHtml(report.report_date)} • Model: <code>${escHtml(report.model_used)}</code>${escHtml(statusTag)} • ${report.posts_analyzed || 0} posts • ${report.elapsed_sec || 0}s${escHtml(appliedTag)}`;
+
+  const topHtml = (report.top_posts || []).length
+    ? `
+      <div>
+        <div class="report-section-title">🏆 Most Successful Posts</div>
+        <ul class="report-list">
+          ${report.top_posts.map((p, idx) => `
+            <li>
+              <strong>#${idx + 1} ${escHtml(p.artist)} — ${escHtml(p.title)}${p.year ? ` (${escHtml(p.year)})` : ""}</strong>
+              <div class="muted" style="margin-top:2px;">${escHtml(p.reason || `${fmtNum(p.views)} views • ${p.engagement_rate || 0}% engagement`)}</div>
+            </li>
+          `).join("")}
+        </ul>
+      </div>
+    `
+    : "";
+
+  const imprHtml = (report.improvements || []).length
+    ? `
+      <div>
+        <div class="report-section-title">💡 Suggested Improvements</div>
+        <ul class="report-list">
+          ${report.improvements.map((tip) => `<li>${escHtml(tip)}</li>`).join("")}
+        </ul>
+      </div>
+    `
+    : "";
+
+  const fw = report.feedback_weights || {};
+  const chips = [];
+  Object.entries(fw.preferred_genres || {}).forEach(([k, v]) => {
+    const cls = v > 1.05 ? "chip-boost" : v < 0.95 ? "chip-lower" : "";
+    chips.push(`<span class="feedback-chip ${cls}">${escHtml(k)} ×${Number(v).toFixed(2)}</span>`);
+  });
+  Object.entries(fw.preferred_decades || {}).forEach(([k, v]) => {
+    const cls = v > 1.05 ? "chip-boost" : v < 0.95 ? "chip-lower" : "";
+    chips.push(`<span class="feedback-chip ${cls}">${escHtml(k)} ×${Number(v).toFixed(2)}</span>`);
+  });
+  Object.entries(fw.preferred_regions || {}).forEach(([k, v]) => {
+    const cls = v > 1.05 ? "chip-boost" : v < 0.95 ? "chip-lower" : "";
+    chips.push(`<span class="feedback-chip ${cls}">${escHtml(k)} ×${Number(v).toFixed(2)}</span>`);
+  });
+  if (fw.recommended_wildcard_chance !== null && fw.recommended_wildcard_chance !== undefined) {
+    chips.push(`<span class="feedback-chip">Wildcard Target: ${fw.recommended_wildcard_chance}%</span>`);
+  }
+  (fw.preferred_templates || []).forEach((t) => {
+    chips.push(`<span class="feedback-chip">Style: ${escHtml(t)}</span>`);
+  });
+
+  const feedbackHtml = `
+    <div>
+      <div class="report-section-title">🎯 Future Track Choice Feedback</div>
+      ${fw.rationale ? `<p class="muted" style="margin-bottom:6px;">${escHtml(fw.rationale)}</p>` : ""}
+      <div class="feedback-chips">${chips.length ? chips.join("") : '<span class="muted">Neutral baseline weights</span>'}</div>
+      <div style="margin-top: 10px;">
+        <button type="button" class="btn btn-small ${report.applied_to_feedback ? "btn-secondary" : "btn-primary"}" onclick="applyReportFeedback(${report.id})">
+          ${report.applied_to_feedback ? "✅ Applied to Future Track Choices" : "🎯 Apply Feedback to Future Track Choices"}
+        </button>
+      </div>
+    </div>
+  `;
+
+  bodyEl.innerHTML = `
+    <div class="report-summary-box">${renderReportMarkdown(report.summary_markdown)}</div>
+    ${topHtml}
+    ${imprHtml}
+    ${feedbackHtml}
+  `;
+}
+
+function renderBreakdowns(breakdowns) {
+  const container = document.getElementById("ana-breakdowns");
+  if (!container) return;
+
+  const sections = [
+    { key: "by_genre", title: "By Genre" },
+    { key: "by_decade", title: "By Decade" },
+    { key: "by_template", title: "By Visual Style Pack" },
+    { key: "by_wildcard", title: "Wildcard vs. Top 20" },
+  ];
+
+  const hasData = sections.some((s) => (breakdowns?.[s.key] || []).length > 0);
+  if (!hasData) {
+    container.innerHTML = `<p class="muted">Add or sync post metrics to see genre, decade, style pack, and wildcard performance charts.</p>`;
+    return;
+  }
+
+  container.innerHTML = sections.map((sec) => {
+    const items = (breakdowns?.[sec.key] || []).slice(0, 6);
+    if (!items.length) return "";
+    const maxScore = Math.max(...items.map((i) => Number(i.avg_score) || 0), 1);
+    return `
+      <div class="breakdown-box">
+        <div class="report-section-title" style="margin-bottom:2px;">${sec.title}</div>
+        ${items.map((item) => {
+          const pct = Math.max(6, Math.round(((Number(item.avg_score) || 0) / maxScore) * 100));
+          return `
+            <div class="breakdown-row">
+              <div class="breakdown-row-head">
+                <span><strong>${escHtml(item.label)}</strong> <span class="muted">(${item.count})</span></span>
+                <span class="muted">${fmtNum(item.avg_views)} avg views • ${item.avg_engagement_rate}% eng</span>
+              </div>
+              <div class="breakdown-bar-bg">
+                <div class="breakdown-bar-fill" style="width:${pct}%"></div>
+              </div>
+            </div>
+          `;
+        }).join("")}
+      </div>
+    `;
+  }).join("");
+}
+
+function renderAnalyticsPosts(posts) {
+  const list = document.getElementById("ana-posts-list");
+  if (!list) return;
+  cachedAnalyticsPosts = posts || [];
+
+  if (!cachedAnalyticsPosts.length) {
+    list.innerHTML = `<p class="muted">No existing posts yet. Generate or publish tracks in Studio first.</p>`;
+    return;
+  }
+
+  list.innerHTML = "";
+  cachedAnalyticsPosts.forEach((p) => {
+    const card = document.createElement("div");
+    card.className = "item-card";
+    const scoreBadge = p.has_metrics
+      ? `<span class="badge badge-posted">Score ${p.performance_score}</span>`
+      : `<span class="badge">No Metrics</span>`;
+    card.innerHTML = `
+      <div class="item-info">
+        <div class="item-title">${escHtml(p.artist)} — ${escHtml(p.title)} <span class="muted">(${escHtml(p.year)})</span></div>
+        <div class="item-meta">
+          ${scoreBadge}
+          <span class="badge">${escHtml(p.genre || "Pop/Rock")}</span>
+          <span class="badge">${escHtml(p.template_used || "vinyl")}</span>
+          ${p.is_wildcard ? '<span class="badge badge-wildcard">Wildcard</span>' : ""}
+        </div>
+        <div class="metrics-row-stats">
+          <span>Views: <strong>${fmtNum(p.views)}</strong></span>
+          <span>Likes: <strong>${fmtNum(p.likes)}</strong></span>
+          <span>Comments: <strong>${fmtNum(p.comments)}</strong></span>
+          <span>Shares: <strong>${fmtNum(p.shares)}</strong></span>
+          <span>Eng: <strong>${p.engagement_rate || 0}%</strong></span>
+          <span>Comp: <strong>${p.completion_rate || 0}%</strong></span>
+        </div>
+      </div>
+      <button type="button" class="btn-small" onclick="openMetricsModal(${p.post_id})">✏️ Metrics</button>
+    `;
+    list.appendChild(card);
+  });
+}
+
+async function loadAnalytics() {
+  try {
+    const res = await fetch("/api/analytics/overview");
+    const data = await res.json();
+
+    const t = data.totals || {};
+    document.getElementById("ana-stat-views").textContent = fmtNum(t.total_views || 0);
+    document.getElementById("ana-stat-eng").textContent = `${t.avg_engagement_rate || 0}%`;
+    document.getElementById("ana-stat-tracked").textContent = `${t.tracked_posts || 0}/${t.total_posts || 0}`;
+
+    const nextEl = document.getElementById("ana-stat-next");
+    if (data.next_analytics_run) {
+      const dt = new Date(data.next_analytics_run);
+      nextEl.textContent = dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    } else {
+      nextEl.textContent = "Paused";
+    }
+
+    const pill = document.getElementById("llm-worker-pill");
+    if (pill && data.llm) {
+      if (data.llm.online && data.llm.model_installed) {
+        pill.textContent = `LLM: ${data.llm.configured_model} Ready`;
+        pill.className = "pill pill-ok";
+      } else if (data.llm.online) {
+        pill.textContent = `LLM: Pull ${data.llm.configured_model}`;
+        pill.className = "pill pill-warn";
+      } else {
+        pill.textContent = "LLM: Offline (Fallback)";
+        pill.className = "pill pill-warn";
+      }
+    }
+
+    const cfg = data.config || {};
+    const timeInput = document.getElementById("ana-report-time");
+    if (timeInput) timeInput.value = cfg.analytics_report_time || "02:00";
+    const modelSel = document.getElementById("ana-llm-model");
+    if (modelSel && cfg.llm_model) {
+      if (![...modelSel.options].some((o) => o.value === cfg.llm_model)) {
+        const opt = document.createElement("option");
+        opt.value = cfg.llm_model;
+        opt.textContent = cfg.llm_model;
+        modelSel.appendChild(opt);
+      }
+      modelSel.value = cfg.llm_model;
+    }
+    const repEnabled = document.getElementById("ana-report-enabled");
+    if (repEnabled) repEnabled.checked = cfg.analytics_report_enabled !== false;
+    const autoSync = document.getElementById("ana-auto-sync");
+    if (autoSync) autoSync.checked = cfg.analytics_auto_sync !== false;
+    const fbEnabled = document.getElementById("ana-feedback-enabled");
+    if (fbEnabled) fbEnabled.checked = cfg.analytics_feedback_enabled !== false;
+    const strengthPct = Math.round((parseFloat(cfg.analytics_feedback_strength || "0.5") || 0.5) * 100);
+    const strSlider = document.getElementById("ana-feedback-strength");
+    const strVal = document.getElementById("ana-strength-val");
+    if (strSlider) strSlider.value = String(strengthPct);
+    if (strVal) strVal.textContent = String(strengthPct);
+
+    cachedAnalyticsReports = data.reports || [];
+    const sel = document.getElementById("ana-report-select");
+    if (sel) {
+      if (!cachedAnalyticsReports.length) {
+        sel.innerHTML = `<option value="">No reports yet</option>`;
+      } else {
+        sel.innerHTML = cachedAnalyticsReports.map((r) =>
+          `<option value="${r.id}">${escHtml(r.report_date)} — #${r.id} (${escHtml(r.model_used)})</option>`
+        ).join("");
+      }
+    }
+    renderAnalyticsReport(data.latest_report || null);
+    renderBreakdowns(data.breakdowns || {});
+    renderAnalyticsPosts(data.posts || []);
+
+    if (data.analytics_job && data.analytics_job.running && !analyticsPollTimer) {
+      startAnalyticsPolling();
+    }
+  } catch (err) {
+    console.error("Failed to load analytics overview", err);
+  }
+}
+
+function startAnalyticsPolling() {
+  const box = document.getElementById("analytics-progress-box");
+  const fill = document.getElementById("analytics-progress-fill");
+  const msg = document.getElementById("analytics-progress-msg");
+  if (box) box.classList.remove("hidden");
+
+  if (analyticsPollTimer) clearInterval(analyticsPollTimer);
+  analyticsPollTimer = setInterval(async () => {
+    try {
+      const res = await fetch("/api/analytics/analyze/status");
+      const st = await res.json();
+      if (fill) fill.style.width = `${st.progress || 0}%`;
+      if (msg) msg.textContent = st.message || "Working...";
+      if (!st.running) {
+        clearInterval(analyticsPollTimer);
+        analyticsPollTimer = null;
+        loadAnalytics();
+      }
+    } catch (e) {
+      console.error("Analytics poll error", e);
+    }
+  }, 1500);
+}
+
+document.getElementById("btn-refresh-analytics")?.addEventListener("click", loadAnalytics);
+
+document.getElementById("ana-feedback-strength")?.addEventListener("input", (e) => {
+  const el = document.getElementById("ana-strength-val");
+  if (el) el.textContent = e.target.value;
+});
+
+document.getElementById("ana-report-select")?.addEventListener("change", (e) => {
+  const id = Number(e.target.value);
+  const found = cachedAnalyticsReports.find((r) => r.id === id);
+  renderAnalyticsReport(found || null);
+});
+
+document.getElementById("btn-save-analytics-cfg")?.addEventListener("click", async () => {
+  const strength = (Number(document.getElementById("ana-feedback-strength")?.value || 50) / 100).toFixed(2);
+  const payload = {
+    settings: {
+      analytics_report_enabled: document.getElementById("ana-report-enabled")?.checked ? "true" : "false",
+      analytics_report_time: document.getElementById("ana-report-time")?.value || "02:00",
+      analytics_auto_sync: document.getElementById("ana-auto-sync")?.checked ? "true" : "false",
+      analytics_feedback_enabled: document.getElementById("ana-feedback-enabled")?.checked ? "true" : "false",
+      analytics_feedback_strength: strength,
+      llm_model: document.getElementById("ana-llm-model")?.value || "qwen3.5:2b",
+    },
+  };
+  const res = await fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (res.ok) {
+    alert("Analytics & daily AI report schedule saved!");
+    loadAnalytics();
+  }
+});
+
+document.getElementById("btn-run-analytics")?.addEventListener("click", async () => {
+  const res = await fetch("/api/analytics/analyze", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sync_first: false }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.detail || "Could not start AI analytics report.");
+    return;
+  }
+  startAnalyticsPolling();
+});
+
+document.getElementById("btn-sync-analytics")?.addEventListener("click", async () => {
+  const res = await fetch("/api/analytics/sync", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.detail || "Could not start TikTok analytics sync.");
+    return;
+  }
+  startAnalyticsPolling();
+});
+
+document.getElementById("btn-pull-llm")?.addEventListener("click", async () => {
+  const model = document.getElementById("ana-llm-model")?.value || "qwen3.5:2b";
+  await fetch("/api/settings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ settings: { llm_model: model } }),
+  });
+  const res = await fetch("/api/llm/pull", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.detail || "Could not pull local LLM model.");
+    return;
+  }
+  startAnalyticsPolling();
+});
+
+window.applyReportFeedback = async (reportId) => {
+  const res = await fetch(`/api/analytics/reports/${reportId}/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apply_wildcard: true }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    alert(data.detail || "Failed to apply feedback.");
+    return;
+  }
+  const wcMsg = data.applied_wildcard_chance !== null && data.applied_wildcard_chance !== undefined
+    ? ` Wildcard chance updated to ${data.applied_wildcard_chance}%.`
+    : "";
+  alert(`Feedback weights from Report #${reportId} are now active for future track selection!${wcMsg}`);
+  loadAnalytics();
+  loadSettings();
+};
+
+window.openMetricsModal = (postId) => {
+  const post = cachedAnalyticsPosts.find((p) => p.post_id === postId);
+  if (!post) return;
+  document.getElementById("metrics-modal-title").textContent = `${post.artist} — ${post.title}`;
+  document.getElementById("metric-post-id").value = String(post.post_id);
+  document.getElementById("metric-views").value = String(post.views || 0);
+  document.getElementById("metric-likes").value = String(post.likes || 0);
+  document.getElementById("metric-comments").value = String(post.comments || 0);
+  document.getElementById("metric-shares").value = String(post.shares || 0);
+  document.getElementById("metric-saves").value = String(post.saves || 0);
+  document.getElementById("metric-completion").value = String(post.completion_rate || 0);
+  document.getElementById("metric-watch-time").value = String(post.avg_watch_time_sec || 0);
+  document.getElementById("metrics-modal").classList.remove("hidden");
+};
+
+document.getElementById("btn-close-metrics-modal")?.addEventListener("click", () => {
+  document.getElementById("metrics-modal").classList.add("hidden");
+});
+
+document.getElementById("metrics-modal")?.addEventListener("click", (e) => {
+  if (e.target.id === "metrics-modal") {
+    document.getElementById("metrics-modal").classList.add("hidden");
+  }
+});
+
+document.getElementById("metrics-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const postId = Number(document.getElementById("metric-post-id").value);
+  const payload = {
+    views: Number(document.getElementById("metric-views").value) || 0,
+    likes: Number(document.getElementById("metric-likes").value) || 0,
+    comments: Number(document.getElementById("metric-comments").value) || 0,
+    shares: Number(document.getElementById("metric-shares").value) || 0,
+    saves: Number(document.getElementById("metric-saves").value) || 0,
+    completion_rate: parseFloat(document.getElementById("metric-completion").value) || 0,
+    avg_watch_time_sec: parseFloat(document.getElementById("metric-watch-time").value) || 0,
+  };
+  const res = await fetch(`/api/analytics/posts/${postId}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    alert("Failed to save post metrics.");
+    return;
+  }
+  document.getElementById("metrics-modal").classList.add("hidden");
+  loadAnalytics();
+});
+
+document.getElementById("analytics-import-input")?.addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (!file) return;
+  const msgEl = document.getElementById("ana-import-msg");
+  try {
+    const content = await file.text();
+    const res = await fetch("/api/analytics/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename: file.name, content }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msgEl) { msgEl.textContent = data.detail || "Import failed."; msgEl.className = "status-err"; }
+    } else {
+      if (msgEl) {
+        msgEl.textContent = `Imported metrics for ${data.matched} post(s) (${data.unmatched} unmatched rows).`;
+        msgEl.className = "status-ok";
+      }
+      loadAnalytics();
+    }
+  } catch (err) {
+    if (msgEl) { msgEl.textContent = `Import error: ${err.message || err}`; msgEl.className = "status-err"; }
+  } finally {
+    e.target.value = "";
+  }
+});
 
 // Initial load
 settingsReady = loadSettings();

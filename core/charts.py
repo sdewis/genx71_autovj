@@ -14,7 +14,7 @@ from core.db import (
     init_db, count_tracks, add_tracks_batch,
     get_available_tracks, get_setting, get_track_by_id,
     get_max_track_batch, get_track_batches, get_existing_track_keys,
-    is_blacklisted
+    is_blacklisted, get_active_feedback_weights,
 )
 
 logger = logging.getLogger("genx71.charts")
@@ -616,12 +616,64 @@ def load_new_chart_batch(
     }
 
 
+def compute_track_feedback_weight(
+    track: Dict[str, Any],
+    feedback: Optional[Dict[str, Any]],
+    strength: float = 0.5,
+) -> float:
+    """
+    Compute a positive selection weight for a candidate track using the latest
+    daily analytics feedback weights (genre, decade, chart region, avoid list).
+    """
+    if not feedback or strength <= 0:
+        return 1.0
+
+    s = max(0.0, min(1.0, float(strength)))
+    raw_weight = 1.0
+
+    genre = (track.get("genre") or "").strip().lower()
+    pref_genres = {
+        str(k).strip().lower(): float(v)
+        for k, v in (feedback.get("preferred_genres") or {}).items()
+    }
+    if genre and genre in pref_genres:
+        raw_weight *= pref_genres[genre]
+
+    avoid = {str(g).strip().lower() for g in (feedback.get("avoid_genres") or []) if g}
+    if genre and genre in avoid:
+        raw_weight *= 0.6
+
+    year = track.get("year")
+    if year:
+        decade = f"{(int(year) // 10) * 10}s"
+        pref_decades = {
+            str(k).strip().lower(): float(v)
+            for k, v in (feedback.get("preferred_decades") or {}).items()
+        }
+        if decade.lower() in pref_decades:
+            raw_weight *= pref_decades[decade.lower()]
+
+    region = (track.get("chart_region") or "").strip().lower()
+    pref_regions = {
+        str(k).strip().lower(): float(v)
+        for k, v in (feedback.get("preferred_regions") or {}).items()
+    }
+    if region and region in pref_regions:
+        raw_weight *= pref_regions[region]
+
+    # Blend toward neutral 1.0 based on configured feedback strength and clamp for diversity
+    blended = 1.0 + (raw_weight - 1.0) * s
+    return round(max(0.25, min(3.0, blended)), 4)
+
+
 def select_next_track(track_id: Optional[int] = None, force_wildcard: Optional[bool] = None,
                       db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Select the next GenX track to render & post.
     - Respects permanent deduplication and blacklist rules.
     - Uses configurable wildcard_chance (default 25%) to pick unusual Top 21-40 gems.
+    - When analytics_feedback_enabled is 'true', biases track selection using the
+      active daily AI analytics feedback weights while preserving catalog diversity.
     """
     seed_charts_if_empty(db_path)
 
@@ -643,6 +695,18 @@ def select_next_track(track_id: Optional[int] = None, force_wildcard: Optional[b
 
     if not candidates:
         return None
+
+    feedback_enabled = get_setting("analytics_feedback_enabled", "true", db_path=db_path) == "true"
+    if feedback_enabled:
+        feedback = get_active_feedback_weights(db_path=db_path)
+        if feedback:
+            try:
+                strength = float(get_setting("analytics_feedback_strength", "0.5", db_path=db_path) or "0.5")
+            except ValueError:
+                strength = 0.5
+            weights = [compute_track_feedback_weight(c, feedback, strength=strength) for c in candidates]
+            if any(w != 1.0 for w in weights):
+                return random.choices(candidates, weights=weights, k=1)[0]
 
     return random.choice(candidates)
 

@@ -13,6 +13,7 @@ services:
       - HOST=0.0.0.0
       - PORT=8710
       - TTS_WORKER_URL=http://tts-worker:8711
+      - LLM_WORKER_URL=http://llm-worker:11434
     volumes:
       - ./data:/app/data
       - ./output:/app/output
@@ -34,4 +35,18 @@ services:
       - ./data:/app/data
       - ./cache:/app/cache
       - ./data/tts_models:/root/.local/share/tts
+
+  llm-worker:
+    image: ollama/ollama:latest
+    container_name: genx71-llm-worker
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ:-Europe/London}
+      - OLLAMA_NUM_PARALLEL=1
+      - OLLAMA_MAX_LOADED_MODELS=1
+      - OLLAMA_KEEP_ALIVE=5m
+      - OLLAMA_NUM_THREAD=${LLM_CPU_THREADS:-4}
+    volumes:
+      - ./data/ollama_models:/root/.ollama
+
 
