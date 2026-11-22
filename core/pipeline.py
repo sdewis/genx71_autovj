@@ -11,12 +11,14 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Callable
 
 from core.db import (
-    init_db, get_setting, record_post, update_post_status, get_post_by_id, queue_post
+    init_db, get_setting, record_post, update_post_status, get_post_by_id,
+    queue_post, get_recent_templates
 )
 from core.charts import select_next_track, format_chart_badge
 from core.artwork import get_single_artwork
 from core.audio import prepare_track_audio
 from core.facts import get_or_fetch_track_facts
+from core.styles import select_style_pack
 from core.video_renderer import render_tiktok_video, OUTPUT_DIR
 from core.tiktok_poster import upload_to_tiktok, build_caption, check_cookie_health
 
@@ -45,6 +47,19 @@ def select_era_appropriate_template(
     return "vinyl"
 
 
+def select_next_style(
+    year: Optional[int],
+    db_path: Optional[str] = None,
+    rng: Optional[random.Random] = None,
+) -> str:
+    """
+    Select the next visual style pack using Era-Weighted Auto-Rotate,
+    avoiding the 2 most recently used styles in SQLite history.
+    """
+    recent = get_recent_templates(limit=2, db_path=db_path)
+    return select_style_pack(year=year, recent_styles=recent, rng=rng)
+
+
 def _safe_filename(text: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_")[:50]
 
@@ -64,7 +79,7 @@ def generate_post_video(
     1. Select non-duplicate GenX track (respecting wildcard % and blacklist)
     2. Fetch high-res single artwork & 3 track trivia facts
     3. Source & intelligently clip 35-45s audio hook (>=30s, <60s TikTok limit)
-    4. Render 9:16 TikTok MP4 with fading facts & animated random GenX watermark
+    4. Render 9:16 TikTok MP4 with selected style pack, FFT visualizer, trivia & neon station bug
     5. Record in SQLite history
     6. Optionally upload/publish to TikTok via stealth Playwright
     """
@@ -88,16 +103,18 @@ def generate_post_video(
     if era_appropriate is True or template == "era":
         chosen_template = select_era_appropriate_template(year)
     elif era_appropriate is False:
-        chosen_template = template or get_setting("default_template", "vinyl", db_path=db_path) or "vinyl"
+        raw_tpl = template or get_setting("default_template", "auto", db_path=db_path) or "auto"
+        chosen_template = select_next_style(year, db_path=db_path) if raw_tpl == "auto" else raw_tpl
     else:
         if template:
-            chosen_template = template
+            chosen_template = select_next_style(year, db_path=db_path) if template == "auto" else template
         elif get_setting("era_appropriate_template", "false", db_path=db_path) == "true":
             chosen_template = select_era_appropriate_template(year)
         else:
-            chosen_template = get_setting("default_template", "vinyl", db_path=db_path) or "vinyl"
+            raw_tpl = get_setting("default_template", "auto", db_path=db_path) or "auto"
+            chosen_template = select_next_style(year, db_path=db_path) if raw_tpl == "auto" else raw_tpl
 
-    wm_opacity = float(get_setting("watermark_opacity", "0.40", db_path=db_path) or "0.40")
+    wm_opacity = float(get_setting("watermark_opacity", "0.65", db_path=db_path) or "0.65")
 
     _prog(f"Fetching artwork & trivia facts for {artist} - {title}...", 25)
     artwork_path = get_single_artwork(artist, title)
@@ -123,7 +140,8 @@ def generate_post_video(
         output_path=output_path,
         template=chosen_template,
         watermark_opacity=wm_opacity,
-        facts=facts
+        facts=facts,
+        audio_features=audio_info.get("audio_features"),
     )
 
     _prog("Saving post record to deduplication DB...", 85)

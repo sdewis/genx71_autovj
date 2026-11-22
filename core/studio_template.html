@@ -1,0 +1,1815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>GenX71 AutoVJ Studio Renderer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 1080px;
+    height: 1920px;
+    overflow: hidden;
+    background: #08090f;
+  }
+  canvas {
+    display: block;
+    width: 1080px;
+    height: 1920px;
+  }
+</style>
+</head>
+<body>
+<canvas id="stage" width="1080" height="1920"></canvas>
+<script>
+(() => {
+  const W = 1080;
+  const H = 1920;
+  const canvas = document.getElementById("stage");
+  const ctx = canvas.getContext("2d", { alpha: false });
+
+  // Font stacks guaranteed to exist on Linux/Docker (Liberation / DejaVu / FreeFont / Noto)
+  const FONT_SANS = '"Liberation Sans", "DejaVu Sans", "Noto Sans", system-ui, sans-serif';
+  const FONT_MONO = '"Liberation Mono", "DejaVu Sans Mono", monospace';
+  const FONT_SERIF = '"Liberation Serif", "DejaVu Serif", Georgia, serif';
+
+  let SCENE = null;
+  let ART_IMG = null;
+  let LOGO_IMG = null;
+  let CACHE = {};
+
+  // --- Easing & Math Helpers ---
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const smoothstep = (u) => {
+    u = clamp(u, 0, 1);
+    return u * u * (3 - 2 * u);
+  };
+  const easeOutCubic = (u) => {
+    u = clamp(u, 0, 1);
+    return 1 - Math.pow(1 - u, 3);
+  };
+  const easeOutBack = (u) => {
+    u = clamp(u, 0, 1);
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(u - 1, 3) + c1 * Math.pow(u - 1, 2);
+  };
+  const easeOutExpo = (u) => (u >= 1 ? 1 : u <= 0 ? 0 : 1 - Math.pow(2, -10 * u));
+
+  function rgbStr(c, a = 1) {
+    return `rgba(${c[0] | 0}, ${c[1] | 0}, ${c[2] | 0}, ${a})`;
+  }
+
+  function brighten(c, factor = 1.25) {
+    return [
+      clamp(Math.round(c[0] * factor), 0, 255),
+      clamp(Math.round(c[1] * factor), 0, 255),
+      clamp(Math.round(c[2] * factor), 0, 255),
+    ];
+  }
+
+  function mixColor(a, b, t) {
+    return [
+      Math.round(lerp(a[0], b[0], t)),
+      Math.round(lerp(a[1], b[1], t)),
+      Math.round(lerp(a[2], b[2], t)),
+    ];
+  }
+
+  function seededRand(seed) {
+    let s = seed % 2147483647;
+    if (s <= 0) s += 2147483646;
+    return () => {
+      s = (s * 16807) % 2147483647;
+      return (s - 1) / 2147483646;
+    };
+  }
+
+  function roundRectPath(c, x, y, w, h, r) {
+    const rr = Math.min(r, w / 2, h / 2);
+    c.beginPath();
+    c.moveTo(x + rr, y);
+    c.arcTo(x + w, y, x + w, y + h, rr);
+    c.arcTo(x + w, y + h, x, y + h, rr);
+    c.arcTo(x, y + h, x, y, rr);
+    c.arcTo(x, y, x + w, y, rr);
+    c.closePath();
+  }
+
+  function wrapText(c, text, maxWidth, maxLines = 3) {
+    const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+    const lines = [];
+    let cur = "";
+    for (const w of words) {
+      const test = cur ? `${cur} ${w}` : w;
+      if (c.measureText(test).width <= maxWidth) {
+        cur = test;
+      } else {
+        if (cur) lines.push(cur);
+        cur = w;
+        if (lines.length >= maxLines) break;
+      }
+    }
+    if (cur && lines.length < maxLines) lines.push(cur);
+    return lines.slice(0, maxLines);
+  }
+
+  function getAudioAt(t) {
+    const f = SCENE.audio;
+    const fps = f.fps || 30;
+    const idx = clamp(Math.floor(t * fps), 0, Math.max(0, (f.rms ? f.rms.length : 1) - 1));
+    const rms = f.rms && f.rms.length ? f.rms[idx] : 0.3;
+    const bass = f.bass && f.bass.length ? f.bass[idx] : rms;
+    const onset = f.onset && f.onset.length ? f.onset[idx] : 0.0;
+    const bands = f.bands && f.bands.length ? f.bands[idx] : new Array(24).fill(rms);
+    return { rms, bass, onset, bands, idx };
+  }
+
+  function getActiveFact(t) {
+    const sched = SCENE.fact_schedule || [];
+    for (let i = 0; i < sched.length; i++) {
+      const s = sched[i];
+      if (t > s.start && t < s.end) {
+        let enter = 1.0;
+        let exit = 1.0;
+        if (s.fade > 0 && t < s.start + s.fade) {
+          enter = (t - s.start) / s.fade;
+        }
+        if (s.fade > 0 && t > s.end - s.fade) {
+          exit = (s.end - t) / s.fade;
+        }
+        return { slot: s, enter: clamp(enter, 0, 1), exit: clamp(exit, 0, 1), alpha: Math.min(smoothstep(enter), smoothstep(exit)) };
+      }
+    }
+    return null;
+  }
+
+  function loadImage(src) {
+    return new Promise((resolve) => {
+      if (!src) return resolve(null);
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = src;
+    });
+  }
+
+  // --- Offscreen Pre-baked Textures for Fast Per-Frame Rendering ---
+  function buildBlurredBackdrop() {
+    const c = document.createElement("canvas");
+    c.width = W;
+    c.height = H;
+    const g = c.getContext("2d");
+    g.fillStyle = rgbStr(SCENE.palette.bg_dark || [12, 14, 24], 1);
+    g.fillRect(0, 0, W, H);
+    if (ART_IMG) {
+      g.save();
+      g.filter = "blur(55px) saturate(1.35) brightness(0.45)";
+      const scale = Math.max(W / ART_IMG.width, H / ART_IMG.height) * 1.15;
+      const dw = ART_IMG.width * scale;
+      const dh = ART_IMG.height * scale;
+      g.drawImage(ART_IMG, (W - dw) / 2, (H - dh) / 2, dw, dh);
+      g.restore();
+    }
+    // Vignette & top/bottom readability gradient
+    const grad = g.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0.0, "rgba(6, 7, 14, 0.72)");
+    grad.addColorStop(0.22, "rgba(6, 7, 14, 0.18)");
+    grad.addColorStop(0.65, "rgba(6, 7, 14, 0.28)");
+    grad.addColorStop(1.0, "rgba(6, 7, 14, 0.88)");
+    g.fillStyle = grad;
+    g.fillRect(0, 0, W, H);
+    return c;
+  }
+
+  function buildNoiseTile(size = 256, alphaMax = 28) {
+    const c = document.createElement("canvas");
+    c.width = size;
+    c.height = size;
+    const g = c.getContext("2d");
+    const imgData = g.createImageData(size, size);
+    const d = imgData.data;
+    const rnd = seededRand(1984);
+    for (let i = 0; i < d.length; i += 4) {
+      const v = (rnd() * 255) | 0;
+      d[i] = v;
+      d[i + 1] = v;
+      d[i + 2] = v;
+      d[i + 3] = (rnd() * alphaMax) | 0;
+    }
+    g.putImageData(imgData, 0, 0);
+    return c;
+  }
+
+  function buildVinylDiscCanvas(size = 560) {
+    const c = document.createElement("canvas");
+    c.width = size;
+    c.height = size;
+    const g = c.getContext("2d");
+    const cx = size / 2;
+    const cy = size / 2;
+    const R = size / 2 - 4;
+
+    // Outer black vinyl body
+    const bodyGrad = g.createRadialGradient(cx, cy, R * 0.25, cx, cy, R);
+    bodyGrad.addColorStop(0, "#191a20");
+    bodyGrad.addColorStop(0.6, "#101116");
+    bodyGrad.addColorStop(1, "#090a0e");
+    g.fillStyle = bodyGrad;
+    g.beginPath();
+    g.arc(cx, cy, R, 0, Math.PI * 2);
+    g.fill();
+
+    // Fine concentric micro-grooves
+    for (let r = R * 0.37; r < R - 8; r += 3.2) {
+      const isBand = Math.abs((r - R * 0.62)) < 4 || Math.abs((r - R * 0.81)) < 3;
+      g.strokeStyle = isBand ? "rgba(255,255,255,0.03)" : ((Math.floor(r) % 3 === 0) ? "rgba(255,255,255,0.075)" : "rgba(255,255,255,0.03)");
+      g.lineWidth = 1;
+      g.beginPath();
+      g.arc(cx, cy, r, 0, Math.PI * 2);
+      g.stroke();
+    }
+
+    // Outer rim bevel
+    g.strokeStyle = "rgba(255,255,255,0.16)";
+    g.lineWidth = 2.5;
+    g.beginPath();
+    g.arc(cx, cy, R - 1, 0, Math.PI * 2);
+    g.stroke();
+
+    // Center artwork label
+    const labelR = size * 0.195;
+    if (ART_IMG) {
+      g.save();
+      g.beginPath();
+      g.arc(cx, cy, labelR, 0, Math.PI * 2);
+      g.clip();
+      g.drawImage(ART_IMG, cx - labelR, cy - labelR, labelR * 2, labelR * 2);
+      g.restore();
+    }
+    g.strokeStyle = "rgba(255,255,255,0.28)";
+    g.lineWidth = 2;
+    g.beginPath();
+    g.arc(cx, cy, labelR, 0, Math.PI * 2);
+    g.stroke();
+
+    // Spindle hole
+    g.fillStyle = "#0a0b10";
+    g.beginPath();
+    g.arc(cx, cy, 11, 0, Math.PI * 2);
+    g.fill();
+    g.strokeStyle = "rgba(220,225,240,0.65)";
+    g.lineWidth = 2;
+    g.stroke();
+    return c;
+  }
+
+  function buildParticles(count = 42) {
+    const rnd = seededRand(7184);
+    const pts = [];
+    for (let i = 0; i < count; i++) {
+      pts.push({
+        x: rnd() * W,
+        y: rnd() * H,
+        r: 2 + rnd() * 6,
+        vx: (rnd() - 0.5) * 18,
+        vy: -(12 + rnd() * 32),
+        phase: rnd() * Math.PI * 2,
+        alpha: 0.15 + rnd() * 0.45,
+      });
+    }
+    return pts;
+  }
+
+  function buildHalftonePattern(dotColor = "rgba(18,22,38,0.08)", spacing = 14) {
+    const c = document.createElement("canvas");
+    c.width = spacing;
+    c.height = spacing;
+    const g = c.getContext("2d");
+    g.fillStyle = dotColor;
+    g.beginPath();
+    g.arc(spacing / 2, spacing / 2, 2.1, 0, Math.PI * 2);
+    g.fill();
+    return ctx.createPattern(c, "repeat");
+  }
+
+  // --- Shared Component: Theme-Integrated Glowing Neon Station Bug ---
+  function drawStationBug(t, audio, themeMode = "dark") {
+    if (!LOGO_IMG) return;
+    const intro = easeOutCubic(clamp((t - 0.25) / 0.7, 0, 1));
+    if (intro <= 0.01) return;
+
+    const targetW = themeMode === "riso" ? 132 : 148;
+    const targetH = Math.round((LOGO_IMG.height / LOGO_IMG.width) * targetW);
+    const x = themeMode === "riso" ? 64 : 52;
+    const y = themeMode === "riso" ? 146 : 136;
+    const cx = x + targetW / 2;
+    const cy = y + targetH / 2;
+    const pulse = 1.0 + audio.onset * 0.055 + audio.bass * 0.025;
+    const opacity = clamp((SCENE.watermark_opacity || 0.85) * 1.45, 0.55, 0.96) * intro;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(pulse * (0.85 + 0.15 * intro), pulse * (0.85 + 0.15 * intro));
+
+    if (themeMode === "riso") {
+      // Dark circular backing badge so the glowing neon pops cleanly on cream paper
+      ctx.fillStyle = "rgba(15, 18, 30, 0.90)";
+      ctx.beginPath();
+      ctx.arc(0, 0, targetW * 0.50, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = rgbStr(SCENE.palette.accent, 0.85);
+      ctx.lineWidth = 3;
+      ctx.stroke();
+    } else {
+      // Subtle ambient neon halo behind the transparent neon sign
+      const halo = ctx.createRadialGradient(0, 0, 8, 0, 0, targetW * 0.65);
+      halo.addColorStop(0, `rgba(0, 225, 255, ${0.22 + audio.onset * 0.18})`);
+      halo.addColorStop(0.55, `rgba(255, 70, 90, ${0.10 + audio.bass * 0.08})`);
+      halo.addColorStop(1, "rgba(0, 0, 0, 0)");
+      ctx.fillStyle = halo;
+      ctx.beginPath();
+      ctx.arc(0, 0, targetW * 0.65, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.globalAlpha = opacity;
+    if (themeMode === "vhs") {
+      // Slight CRT phosphor shimmer
+      ctx.shadowColor = "rgba(0, 240, 255, 0.7)";
+      ctx.shadowBlur = 14 + audio.onset * 10;
+    } else if (themeMode === "neon" || themeMode === "dark") {
+      ctx.shadowColor = "rgba(0, 220, 255, 0.55)";
+      ctx.shadowBlur = 16 + audio.onset * 12;
+    }
+    ctx.drawImage(LOGO_IMG, -targetW / 2, -targetH / 2, targetW, targetH);
+    ctx.restore();
+  }
+
+  // --- Shared Component: Subtle Film Grain ---
+  function drawFilmGrain(t, alpha = 0.22) {
+    if (!CACHE.noiseTile) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    const ox = -((Math.floor(t * 24) * 53) % 256);
+    const oy = -((Math.floor(t * 24) * 97) % 256);
+    const pat = ctx.createPattern(CACHE.noiseTile, "repeat");
+    ctx.translate(ox, oy);
+    ctx.fillStyle = pat;
+    ctx.fillRect(-ox, -oy, W + 256, H + 256);
+    ctx.restore();
+  }
+
+  // =========================================================================
+  // STYLE 1: HI-FI AUDIOPHILE (3D Vinyl + Tonearm / Glossy 3D CD / Studio Card)
+  // =========================================================================
+  function renderHiFi(t, audio) {
+    const accent = SCENE.palette.accent;
+    const primary = SCENE.palette.primary;
+    const variant = SCENE.media_variant || (SCENE.year >= 1988 ? "cd" : "vinyl");
+    const intro = easeOutCubic(clamp(t / 1.25, 0, 1));
+    const introSpring = easeOutBack(clamp((t - 0.1) / 0.9, 0, 1));
+
+    // 1. Living Ken Burns ambient backdrop
+    ctx.save();
+    const kbScale = 1.04 + 0.04 * Math.sin(t * 0.22) + audio.bass * 0.012;
+    const kbX = Math.sin(t * 0.18) * 18;
+    const kbY = Math.cos(t * 0.15) * 14;
+    ctx.translate(W / 2 + kbX, H / 2 + kbY);
+    ctx.scale(kbScale, kbScale);
+    ctx.drawImage(CACHE.backdrop, -W / 2, -H / 2);
+    ctx.restore();
+
+    // 2. Beat-reactive radial studio spotlight behind hero
+    const spotR = 460 + audio.bass * 95 + audio.onset * 65;
+    const spot = ctx.createRadialGradient(W / 2, 610, 40, W / 2, 610, spotR);
+    spot.addColorStop(0, rgbStr(accent, 0.34 + audio.onset * 0.18));
+    spot.addColorStop(0.5, rgbStr(primary, 0.14));
+    spot.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = spot;
+    ctx.fillRect(0, 0, W, H);
+
+    // 3. Drifting warm studio bokeh particles
+    for (const p of CACHE.particles) {
+      const px = ((p.x + p.vx * t) % W + W) % W;
+      const py = ((p.y + p.vy * t) % H + H) % H;
+      const br = p.r * (1.0 + audio.bass * 0.35);
+      ctx.fillStyle = rgbStr(brighten(accent, 1.35), p.alpha * (0.45 + 0.35 * Math.sin(t * 2 + p.phase)));
+      ctx.beginPath();
+      ctx.arc(px, py, br, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 4. Top Chart Peak Pill Badge (right of station bug, centered-right safe)
+    const badgeY = lerp(110, 185, intro);
+    ctx.save();
+    ctx.globalAlpha = intro;
+    ctx.font = `700 28px ${FONT_SANS}`;
+    const badgeText = SCENE.chart_badge.toUpperCase();
+    const bw = Math.max(280, ctx.measureText(badgeText).width + 68);
+    const bh = 56;
+    const bx = (W - bw) / 2 + 26;
+    roundRectPath(ctx, bx, badgeY, bw, bh, 28);
+    ctx.fillStyle = "rgba(14, 16, 26, 0.78)";
+    ctx.fill();
+    ctx.strokeStyle = rgbStr(accent, 0.85);
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(badgeText, bx + bw / 2, badgeY + bh / 2 + 1);
+    ctx.restore();
+
+    // 5. Hero Centerpiece (y ~ 310..930)
+    if (variant === "vinyl") {
+      const sleeveSlide = lerp(-180, 0, intro);
+      const discSlide = lerp(-240, 0, easeOutCubic(clamp((t - 0.15) / 1.1, 0, 1)));
+      const discCx = 665 + discSlide;
+      const discCy = 615;
+      const discSize = 530;
+
+      // Drop shadow under vinyl
+      ctx.save();
+      ctx.fillStyle = "rgba(0,0,0,0.52)";
+      ctx.filter = "blur(24px)";
+      ctx.beginPath();
+      ctx.arc(discCx + 10, discCy + 22, discSize * 0.48, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      // Rotating vinyl disc
+      ctx.save();
+      ctx.translate(discCx, discCy);
+      ctx.rotate(t * 2.15); // ~33.3 RPM feel
+      ctx.drawImage(CACHE.vinylDisc, -discSize / 2, -discSize / 2, discSize, discSize);
+      ctx.restore();
+
+      // Fixed world-space specular light cone on vinyl (realistic sheen!)
+      ctx.save();
+      ctx.translate(discCx, discCy);
+      ctx.beginPath();
+      ctx.arc(0, 0, discSize * 0.49, 0, Math.PI * 2);
+      ctx.clip();
+      const sheenAngle = 0.55 + Math.sin(t * 0.8) * 0.08;
+      ctx.rotate(sheenAngle);
+      const sheenGrad = ctx.createLinearGradient(-discSize / 2, -40, discSize / 2, 40);
+      sheenGrad.addColorStop(0, "rgba(255,255,255,0)");
+      sheenGrad.addColorStop(0.45, "rgba(255,255,255,0.13)");
+      sheenGrad.addColorStop(0.5, "rgba(255,255,255,0.22)");
+      sheenGrad.addColorStop(0.55, "rgba(255,255,255,0.13)");
+      sheenGrad.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = sheenGrad;
+      ctx.fillRect(-discSize / 2, -45, discSize, 90);
+      ctx.restore();
+
+      // Metallic Turntable Tonearm on upper-right of vinyl
+      ctx.save();
+      const pivotX = 905;
+      const pivotY = 395;
+      const armAngle = lerp(-0.55, 0.28 + (t / SCENE.duration) * 0.14, easeOutCubic(clamp((t - 0.35) / 0.9, 0, 1)));
+      ctx.translate(pivotX, pivotY);
+      // Gimbal base
+      ctx.fillStyle = "#2b2f3c";
+      ctx.beginPath();
+      ctx.arc(0, 0, 34, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.35)";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.fillStyle = "#aeb6c8";
+      ctx.beginPath();
+      ctx.arc(0, 0, 14, 0, Math.PI * 2);
+      ctx.fill();
+      // Arm wand
+      ctx.rotate(armAngle);
+      ctx.strokeStyle = "#d8dee9";
+      ctx.lineWidth = 7;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-10, 215);
+      ctx.lineTo(-42, 265);
+      ctx.stroke();
+      // Cartridge headshell
+      ctx.fillStyle = rgbStr(accent, 0.95);
+      roundRectPath(ctx, -56, 255, 28, 36, 5);
+      ctx.fill();
+      ctx.restore();
+
+      // Sleeve Cover (elevated with crisp shadow & subtle beat pop)
+      const sx = 98 + sleeveSlide;
+      const sy = 350;
+      const sSize = 530;
+      ctx.save();
+      const pop = 1.0 + audio.onset * 0.015;
+      ctx.translate(sx + sSize / 2, sy + sSize / 2);
+      ctx.scale(pop, pop);
+      ctx.shadowColor = "rgba(0,0,0,0.68)";
+      ctx.shadowBlur = 42;
+      ctx.shadowOffsetX = 14;
+      ctx.shadowOffsetY = 22;
+      roundRectPath(ctx, -sSize / 2, -sSize / 2, sSize, sSize, 12);
+      ctx.fillStyle = "#111";
+      ctx.fill();
+      ctx.shadowColor = "transparent";
+      ctx.clip();
+      if (ART_IMG) ctx.drawImage(ART_IMG, -sSize / 2, -sSize / 2, sSize, sSize);
+      // Subtle vinyl ringwear / glossy top highlight
+      const sGloss = ctx.createLinearGradient(-sSize / 2, -sSize / 2, sSize / 2, sSize / 2);
+      sGloss.addColorStop(0, "rgba(255,255,255,0.16)");
+      sGloss.addColorStop(0.35, "rgba(255,255,255,0.0)");
+      sGloss.addColorStop(1, "rgba(0,0,0,0.18)");
+      ctx.fillStyle = sGloss;
+      ctx.fillRect(-sSize / 2, -sSize / 2, sSize, sSize);
+      ctx.restore();
+
+      // Crisp border
+      ctx.save();
+      ctx.translate(sx + sSize / 2, sy + sSize / 2);
+      ctx.scale(pop, pop);
+      roundRectPath(ctx, -sSize / 2, -sSize / 2, sSize, sSize, 12);
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.restore();
+    } else if (variant === "cd") {
+      // 3D-tilted High-Gloss CD Jewel Case with sweeping specular glare
+      const caseSize = 580;
+      const spineW = 58;
+      const totalW = caseSize + spineW;
+      const floatY = Math.sin(t * 1.7) * 14;
+      const tilt = Math.sin(t * 0.9) * 0.028;
+      const pop = (0.82 + 0.18 * introSpring) * (1.0 + audio.onset * 0.02);
+
+      ctx.save();
+      ctx.translate(W / 2, 620 + floatY);
+      ctx.rotate(tilt);
+      ctx.scale(pop, pop);
+
+      // Soft ambient shadow
+      ctx.shadowColor = "rgba(0,0,0,0.72)";
+      ctx.shadowBlur = 48;
+      ctx.shadowOffsetY = 28;
+      roundRectPath(ctx, -totalW / 2, -caseSize / 2, totalW, caseSize, 12);
+      ctx.fillStyle = "rgba(18, 20, 28, 0.92)";
+      ctx.fill();
+      ctx.shadowColor = "transparent";
+
+      // Translucent ribbed spine on left
+      roundRectPath(ctx, -totalW / 2, -caseSize / 2, spineW + 6, caseSize, 10);
+      ctx.fillStyle = "rgba(24, 26, 36, 0.95)";
+      ctx.fill();
+      for (let y = -caseSize / 2 + 22; y < caseSize / 2 - 20; y += 13) {
+        ctx.fillStyle = "rgba(155, 165, 190, 0.28)";
+        ctx.fillRect(-totalW / 2 + 12, y, spineW - 22, 3.5);
+      }
+
+      // Cover artwork
+      const ax = -totalW / 2 + spineW + 8;
+      const ay = -caseSize / 2 + 10;
+      const aw = caseSize - 18;
+      const ah = caseSize - 20;
+      if (ART_IMG) {
+        ctx.save();
+        roundRectPath(ctx, ax, ay, aw, ah, 6);
+        ctx.clip();
+        ctx.drawImage(ART_IMG, ax, ay, aw, ah);
+        ctx.restore();
+      }
+
+      // Dynamic sweeping glossy acrylic reflection
+      ctx.save();
+      roundRectPath(ctx, -totalW / 2, -caseSize / 2, totalW, caseSize, 12);
+      ctx.clip();
+      const sweepX = ((t * 150) % (totalW * 2.2)) - totalW * 1.1;
+      const gSweep = ctx.createLinearGradient(sweepX - 120, -caseSize / 2, sweepX + 120, caseSize / 2);
+      gSweep.addColorStop(0, "rgba(255,255,255,0)");
+      gSweep.addColorStop(0.45, "rgba(255,255,255,0.14)");
+      gSweep.addColorStop(0.5, "rgba(255,255,255,0.28)");
+      gSweep.addColorStop(0.55, "rgba(255,255,255,0.14)");
+      gSweep.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.fillStyle = gSweep;
+      ctx.fillRect(-totalW / 2, -caseSize / 2, totalW, caseSize);
+
+      // Static subtle acrylic corner sheen
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
+      ctx.beginPath();
+      ctx.moveTo(-totalW / 2 + spineW, -caseSize / 2);
+      ctx.lineTo(-totalW / 2 + spineW + caseSize * 0.52, -caseSize / 2);
+      ctx.lineTo(-totalW / 2 + spineW + caseSize * 0.14, caseSize / 2);
+      ctx.lineTo(-totalW / 2 + spineW, caseSize / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      // Acrylic case rim & hinges
+      roundRectPath(ctx, -totalW / 2, -caseSize / 2, totalW, caseSize, 12);
+      ctx.strokeStyle = "rgba(255,255,255,0.38)";
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.restore();
+    } else {
+      // Frosted-glass audiophile card (legacy 'retro')
+      const cw = 720, ch = 670;
+      const cx = (W - cw) / 2, cy = 290;
+      ctx.save();
+      ctx.globalAlpha = intro;
+      roundRectPath(ctx, cx, cy, cw, ch, 40);
+      ctx.fillStyle = "rgba(16, 18, 30, 0.76)";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.20)";
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      if (ART_IMG) {
+        const asz = 540;
+        ctx.save();
+        roundRectPath(ctx, (W - asz) / 2, cy + 36, asz, asz, 26);
+        ctx.clip();
+        ctx.drawImage(ART_IMG, (W - asz) / 2, cy + 36, asz, asz);
+        ctx.restore();
+      }
+      // Progress bar inside card
+      const pbX = cx + 70, pbY = cy + ch - 46, pbW = cw - 140;
+      roundRectPath(ctx, pbX, pbY, pbW, 10, 5);
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
+      ctx.fill();
+      roundRectPath(ctx, pbX, pbY, Math.max(12, pbW * (t / Math.max(1, SCENE.duration))), 10, 5);
+      ctx.fillStyle = rgbStr(accent, 1);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // 6. Track Title & Artist (kinetic slide-up reveal, y ~ 985..1145)
+    const textEnter = easeOutCubic(clamp((t - 0.25) / 0.85, 0, 1));
+    ctx.save();
+    ctx.globalAlpha = textEnter;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `800 58px ${FONT_SANS}`;
+    const titleLines = wrapText(ctx, SCENE.title, W - 180, 2);
+    let ty = 1020 + (1 - textEnter) * 32;
+    for (const line of titleLines) {
+      ctx.shadowColor = "rgba(0,0,0,0.65)";
+      ctx.shadowBlur = 16;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(line, W / 2, ty);
+      ty += 66;
+    }
+    ctx.shadowBlur = 8;
+    ctx.font = `700 36px ${FONT_SANS}`;
+    ctx.fillStyle = rgbStr(brighten(accent, 1.25), 1);
+    ctx.fillText(SCENE.artist.toUpperCase(), W / 2, ty + 14);
+    ctx.restore();
+
+    // 7. Real 24-Band Mirrored Studio LED Spectrum (y ~ 1185..1315)
+    const nBars = 24;
+    const barW = 20;
+    const gap = 12;
+    const totalEqW = nBars * barW + (nBars - 1) * gap;
+    const eqX = (W - totalEqW) / 2;
+    const eqMidY = 1260;
+    for (let b = 0; b < nBars; b++) {
+      const mag = audio.bands[b] || 0.1;
+      const h = 8 + mag * 62;
+      const bx = eqX + b * (barW + gap);
+      const grad = ctx.createLinearGradient(bx, eqMidY - h, bx, eqMidY + h * 0.4);
+      grad.addColorStop(0, rgbStr(brighten(accent, 1.45), 0.96));
+      grad.addColorStop(0.65, rgbStr(accent, 0.85));
+      grad.addColorStop(1, rgbStr(accent, 0.22));
+      ctx.fillStyle = grad;
+      roundRectPath(ctx, bx, eqMidY - h, barW, h, 6);
+      ctx.fill();
+      // Subtle reflection below axis
+      ctx.fillStyle = rgbStr(accent, 0.22);
+      roundRectPath(ctx, bx, eqMidY + 4, barW, h * 0.35, 4);
+      ctx.fill();
+    }
+
+    // 8. Spring-Sliding Frosted Glass Trivia Card (y=1352..1544)
+    const fact = getActiveFact(t);
+    if (fact) {
+      const slideY = (1 - easeOutCubic(fact.enter)) * 42 - (1 - easeOutCubic(fact.exit)) * 24;
+      const fx = 80, fy = 1352 + slideY, fw = 920, fh = 192;
+      ctx.save();
+      ctx.globalAlpha = fact.alpha;
+      roundRectPath(ctx, fx, fy, fw, fh, 26);
+      ctx.fillStyle = "rgba(12, 15, 26, 0.82)";
+      ctx.fill();
+      ctx.strokeStyle = rgbStr(accent, 0.78);
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      // Left accent bar
+      roundRectPath(ctx, fx + 18, fy + 28, 6, fh - 56, 3);
+      ctx.fillStyle = rgbStr(accent, 1);
+      ctx.fill();
+
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.font = `700 22px ${FONT_MONO}`;
+      ctx.fillStyle = rgbStr(brighten(accent, 1.3), 0.95);
+      ctx.fillText(`TRACK TRIVIA  •  0${fact.slot.index + 1} / 0${fact.slot.total}`, fx + 44, fy + 38);
+
+      ctx.font = `500 33px ${FONT_SANS}`;
+      ctx.fillStyle = "#f4f6ff";
+      const lines = wrapText(ctx, fact.slot.text, fw - 84, 3);
+      const lineH = 42;
+      const startY = fy + 82 + ((3 - lines.length) * lineH) / 4;
+      lines.forEach((ln, idx) => ctx.fillText(ln, fx + 44, startY + idx * lineH));
+      ctx.restore();
+    }
+
+    drawStationBug(t, audio, "dark");
+    drawFilmGrain(t, 0.16);
+  }
+
+  // =========================================================================
+  // STYLE 2: VHS / MTV BROADCAST (CRT Scanlines, Tracking Lock, MTV Lower-Third)
+  // =========================================================================
+  function renderVHS(t, audio) {
+    const accent = SCENE.palette.accent;
+    const intro = easeOutExpo(clamp(t / 1.1, 0, 1));
+    const trackingGlitch = t < 1.35 ? (1.0 - t / 1.35) : (audio.onset > 0.72 ? 0.35 : 0.0);
+
+    // 1. CRT phosphor background
+    ctx.fillStyle = "#080b14";
+    ctx.fillRect(0, 0, W, H);
+    ctx.save();
+    ctx.globalAlpha = 0.65;
+    ctx.drawImage(CACHE.backdrop, 0, 0);
+    ctx.restore();
+
+    // Subtle CRT blue-magenta phosphor tint
+    const tint = ctx.createLinearGradient(0, 0, W, H);
+    tint.addColorStop(0, "rgba(18, 28, 68, 0.45)");
+    tint.addColorStop(1, "rgba(42, 12, 48, 0.50)");
+    ctx.fillStyle = tint;
+    ctx.fillRect(0, 0, W, H);
+
+    // 2. CRT Top OSD HUD (PLAY ▶, SP timecode, CH-71)
+    ctx.save();
+    ctx.font = `700 30px ${FONT_MONO}`;
+    ctx.textBaseline = "middle";
+    // Right-aligned OSD (safe left of right margin)
+    const secs = Math.floor(t);
+    const ms = Math.floor((t - secs) * 30);
+    const tc = `SP 0:${String(Math.floor(secs / 60)).padStart(2, "0")}:${String(secs % 60).padStart(2, "0")}.${String(ms).padStart(2, "0")}`;
+    ctx.fillStyle = "rgba(180, 255, 200, 0.92)";
+    ctx.shadowColor = "rgba(80, 255, 140, 0.6)";
+    ctx.shadowBlur = 10;
+    ctx.textAlign = "right";
+    ctx.fillText(`▶ PLAY  ${tc}`, 935, 185);
+    ctx.font = `700 24px ${FONT_MONO}`;
+    ctx.fillStyle = "rgba(255, 255, 255, 0.78)";
+    ctx.fillText(`CH-71  •  ${SCENE.chart_badge.toUpperCase()}`, 935, 224);
+    ctx.restore();
+
+    // 3. Hero Broadcast Monitor Frame (with CRT vertical warm-up on intro + RGB split on kicks)
+    const boxW = 820;
+    const boxH = 680;
+    const boxX = (W - boxW) / 2;
+    const boxY = 290;
+    const jitterX = trackingGlitch > 0 ? Math.sin(t * 95) * 14 * trackingGlitch : 0;
+
+    ctx.save();
+    // CRT power-on vertical expand
+    const scaleY = clamp(0.06 + 0.94 * intro, 0.06, 1.0);
+    ctx.translate(W / 2 + jitterX, boxY + boxH / 2);
+    ctx.scale(1.0 + audio.onset * 0.014, scaleY);
+
+    // Outer CRT monitor bezel
+    roundRectPath(ctx, -boxW / 2 - 14, -boxH / 2 - 14, boxW + 28, boxH + 28, 34);
+    ctx.fillStyle = "#12151f";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(180, 220, 255, 0.32)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // Artwork inside CRT screen with slight Ken Burns drift
+    ctx.save();
+    roundRectPath(ctx, -boxW / 2, -boxH / 2, boxW, boxH, 24);
+    ctx.clip();
+    if (ART_IMG) {
+      const z = 1.06 + 0.05 * Math.sin(t * 0.45);
+      const dw = boxW * z;
+      const dh = boxW * z;
+      ctx.drawImage(ART_IMG, -dw / 2, -dh / 2, dw, dh);
+
+      // Chromatic aberration RGB ghost on kick hits / tracking glitch
+      const chromaShift = 4 + audio.onset * 12 + trackingGlitch * 16;
+      ctx.globalCompositeOperation = "screen";
+      ctx.globalAlpha = 0.24 + audio.onset * 0.16;
+      ctx.drawImage(ART_IMG, -dw / 2 - chromaShift, -dh / 2, dw, dh);
+      ctx.globalAlpha = 0.18 + audio.onset * 0.12;
+      ctx.drawImage(ART_IMG, -dw / 2 + chromaShift, -dh / 2, dw, dh);
+      ctx.globalCompositeOperation = "source-over";
+      ctx.globalAlpha = 1.0;
+    }
+
+    // Phosphor oscilloscope waveform across bottom of CRT screen
+    ctx.strokeStyle = "rgba(110, 255, 220, 0.92)";
+    ctx.shadowColor = "rgba(0, 255, 200, 0.85)";
+    ctx.shadowBlur = 12;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    const nPts = 64;
+    for (let i = 0; i <= nPts; i++) {
+      const u = i / nPts;
+      const bandIdx = Math.min(23, Math.floor(u * 24));
+      const amp = (audio.bands[bandIdx] || 0.2) * 72;
+      const px = -boxW / 2 + 24 + u * (boxW - 48);
+      const py = boxH / 2 - 70 + Math.sin(u * 26 + t * 14) * amp * 0.65;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+
+    // Inner CRT curved shadow
+    const crtVig = ctx.createRadialGradient(0, 0, boxW * 0.28, 0, 0, boxW * 0.65);
+    crtVig.addColorStop(0, "rgba(0,0,0,0)");
+    crtVig.addColorStop(1, "rgba(0,0,0,0.58)");
+    ctx.fillStyle = crtVig;
+    ctx.fillRect(-boxW / 2, -boxH / 2, boxW, boxH);
+    ctx.restore();
+    ctx.restore();
+
+    // 4. Classic MTV / VH1 Lower-Third Song Credit Block (left-aligned, y ~ 1035..1245)
+    const mtvEnter = easeOutCubic(clamp((t - 0.35) / 0.75, 0, 1));
+    ctx.save();
+    ctx.globalAlpha = mtvEnter;
+    const lx = 86 - (1 - mtvEnter) * 60;
+    const ly = 1045;
+
+    // Broadcast accent vertical bar
+    ctx.fillStyle = "#ffde3b";
+    ctx.fillRect(lx, ly, 10, 178);
+
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.shadowColor = "rgba(0,0,0,0.85)";
+    ctx.shadowBlur = 6;
+    ctx.shadowOffsetX = 3;
+    ctx.shadowOffsetY = 3;
+
+    ctx.font = `800 30px ${FONT_MONO}`;
+    ctx.fillStyle = "#ffde3b";
+    ctx.fillText(`NOW PLAYING // ${SCENE.year}`, lx + 28, ly + 2);
+
+    ctx.font = `900 54px ${FONT_SANS}`;
+    ctx.fillStyle = "#ffffff";
+    const tLines = wrapText(ctx, `"${SCENE.title.toUpperCase()}"`, 810, 2);
+    tLines.forEach((ln, idx) => ctx.fillText(ln, lx + 28, ly + 44 + idx * 58));
+
+    ctx.font = `700 36px ${FONT_SANS}`;
+    ctx.fillStyle = "#d8e6ff";
+    ctx.fillText(SCENE.artist.toUpperCase(), lx + 28, ly + 44 + tLines.length * 58 + 6);
+    ctx.restore();
+
+    // 5. Broadcast Chyron Trivia Bar (y = 1350..1542)
+    const fact = getActiveFact(t);
+    if (fact) {
+      const wipe = easeOutCubic(fact.enter);
+      const fx = 76, fy = 1352, fw = 910, fh = 188;
+      ctx.save();
+      ctx.globalAlpha = fact.alpha;
+      ctx.fillStyle = "rgba(8, 14, 34, 0.90)";
+      ctx.fillRect(fx, fy, fw * wipe, fh);
+      ctx.fillStyle = "#00f0ff";
+      ctx.fillRect(fx, fy, fw * wipe, 6);
+      ctx.fillStyle = "#ff3b8d";
+      ctx.fillRect(fx, fy + fh - 6, fw * wipe, 6);
+
+      if (wipe > 0.35) {
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.font = `700 23px ${FONT_MONO}`;
+        ctx.fillStyle = "#00f0ff";
+        ctx.fillText(`VH1 POP-UP FACT [${fact.slot.index + 1}/${fact.slot.total}]`, fx + 28, fy + 36);
+        ctx.font = `600 32px ${FONT_SANS}`;
+        ctx.fillStyle = "#ffffff";
+        const lines = wrapText(ctx, fact.slot.text, fw - 56, 3);
+        const lh = 41;
+        const sy = fy + 80 + ((3 - lines.length) * lh) / 4;
+        lines.forEach((ln, i) => ctx.fillText(ln, fx + 28, sy + i * lh));
+      }
+      ctx.restore();
+    }
+
+    // 6. Full-Frame CRT Scanlines & Rolling VHS Tracking Band
+    ctx.save();
+    ctx.fillStyle = "rgba(0, 0, 0, 0.22)";
+    for (let y = 0; y < H; y += 6) {
+      ctx.fillRect(0, y, W, 2);
+    }
+    // Rolling subtle tracking band
+    const bandY = ((t * 190) % (H + 240)) - 120;
+    const bGrad = ctx.createLinearGradient(0, bandY - 50, 0, bandY + 50);
+    bGrad.addColorStop(0, "rgba(255,255,255,0)");
+    bGrad.addColorStop(0.5, `rgba(200,240,255,${0.05 + trackingGlitch * 0.14})`);
+    bGrad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = bGrad;
+    ctx.fillRect(0, bandY - 50, W, 100);
+    ctx.restore();
+
+    drawStationBug(t, audio, "vhs");
+    drawFilmGrain(t, 0.26);
+  }
+
+  // =========================================================================
+  // STYLE 3: NEON TUBES (80s Synthwave Grid, Neon Bloom Frame & Light Leaks)
+  // =========================================================================
+  function renderNeon(t, audio) {
+    const cyan = [0, 238, 255];
+    const pink = [255, 42, 146];
+    const accent = SCENE.palette.accent;
+    // Neon tube ignition flicker during first 1.0s
+    const flicker = t < 0.9 ? (Math.sin(t * 52) > -0.35 ? easeOutCubic(t / 0.9) : 0.22) : 1.0;
+
+    // 1. Deep Synthwave Night Sky
+    const sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0.0, "#070316");
+    sky.addColorStop(0.45, "#150734");
+    sky.addColorStop(0.72, "#2c0a4a");
+    sky.addColorStop(1.0, "#090418");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    // 2. Twinkling 80s Starfield
+    for (const p of CACHE.particles) {
+      const tw = 0.35 + 0.65 * Math.abs(Math.sin(t * 2.4 + p.phase));
+      ctx.fillStyle = `rgba(220, 240, 255, ${tw * 0.7})`;
+      ctx.beginPath();
+      ctx.arc(p.x, (p.y * 0.55) % 1050, Math.max(1.5, p.r * 0.45), 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 3. Synthwave Retrowave Sun Halo behind hero
+    const sunY = 585;
+    const sunR = 340 + audio.bass * 26 + audio.onset * 18;
+    ctx.save();
+    const sunGrad = ctx.createLinearGradient(0, sunY - sunR, 0, sunY + sunR);
+    sunGrad.addColorStop(0, "rgba(255, 220, 70, 0.72)");
+    sunGrad.addColorStop(0.5, "rgba(255, 52, 130, 0.68)");
+    sunGrad.addColorStop(1, "rgba(130, 20, 220, 0.15)");
+    ctx.fillStyle = sunGrad;
+    ctx.beginPath();
+    ctx.arc(W / 2, sunY, sunR, 0, Math.PI * 2);
+    ctx.fill();
+    // Horizontal retro sun slices
+    ctx.fillStyle = "#180838";
+    for (let i = 0; i < 6; i++) {
+      const sy = sunY + 60 + i * 38;
+      ctx.fillRect(W / 2 - sunR, sy, sunR * 2, 6 + i * 2.6);
+    }
+    ctx.restore();
+
+    // 4. Animated 3D Perspective Neon Floor Grid (horizon y = 960 -> 1920)
+    const horizonY = 950;
+    ctx.save();
+    ctx.strokeStyle = `rgba(255, 42, 160, ${0.42 + audio.bass * 0.25})`;
+    ctx.lineWidth = 2.5;
+    // Perspective radial lines
+    for (let i = -9; i <= 9; i++) {
+      ctx.beginPath();
+      ctx.moveTo(W / 2 + i * 55, horizonY);
+      ctx.lineTo(W / 2 + i * 320, H);
+      ctx.stroke();
+    }
+    // Scrolling horizontal depth lines
+    const speed = 0.85;
+    for (let j = 0; j < 14; j++) {
+      const frac = ((j / 14) + (t * speed) % (1 / 14));
+      const y = horizonY + Math.pow(frac, 2.25) * (H - horizonY);
+      ctx.strokeStyle = `rgba(0, 238, 255, ${(0.18 + frac * 0.52) * flicker})`;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+    // Horizon neon glow bar
+    const hGlow = ctx.createLinearGradient(0, horizonY - 24, 0, horizonY + 24);
+    hGlow.addColorStop(0, "rgba(255,42,146,0)");
+    hGlow.addColorStop(0.5, `rgba(255,42,146,${0.65 + audio.onset * 0.3})`);
+    hGlow.addColorStop(1, "rgba(255,42,146,0)");
+    ctx.fillStyle = hGlow;
+    ctx.fillRect(0, horizonY - 24, W, 48);
+    ctx.restore();
+
+    // 5. Top Neon Badge
+    ctx.save();
+    ctx.globalAlpha = flicker;
+    ctx.font = `700 28px ${FONT_MONO}`;
+    const bText = SCENE.chart_badge.toUpperCase();
+    const bw = Math.max(280, ctx.measureText(bText).width + 64);
+    const bx = (W - bw) / 2 + 26;
+    const by = 182;
+    roundRectPath(ctx, bx, by, bw, 54, 27);
+    ctx.fillStyle = "rgba(10, 4, 28, 0.82)";
+    ctx.fill();
+    ctx.shadowColor = rgbStr(cyan, 0.9);
+    ctx.shadowBlur = 16;
+    ctx.strokeStyle = rgbStr(cyan, 0.95);
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(bText, bx + bw / 2, by + 28);
+    ctx.restore();
+
+    // 6. Hero Multi-Tube Glowing Neon Frame + Artwork (y = 315..885)
+    const artSz = 540;
+    const ax = (W - artSz) / 2;
+    const ay = 325;
+    const pop = 1.0 + audio.onset * 0.024 + audio.bass * 0.01;
+    ctx.save();
+    ctx.translate(W / 2, ay + artSz / 2);
+    ctx.scale(pop, pop);
+
+    // Outer pink neon tube
+    ctx.shadowColor = rgbStr(pink, 0.95);
+    ctx.shadowBlur = 32 + audio.onset * 24;
+    ctx.strokeStyle = rgbStr(pink, flicker);
+    ctx.lineWidth = 7;
+    roundRectPath(ctx, -artSz / 2 - 22, -artSz / 2 - 22, artSz + 44, artSz + 44, 28);
+    ctx.stroke();
+
+    // Inner cyan neon tube
+    ctx.shadowColor = rgbStr(cyan, 0.95);
+    ctx.shadowBlur = 22 + audio.bass * 18;
+    ctx.strokeStyle = rgbStr(cyan, flicker);
+    ctx.lineWidth = 4;
+    roundRectPath(ctx, -artSz / 2 - 8, -artSz / 2 - 8, artSz + 16, artSz + 16, 18);
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Album Artwork
+    if (ART_IMG) {
+      ctx.save();
+      roundRectPath(ctx, -artSz / 2, -artSz / 2, artSz, artSz, 14);
+      ctx.clip();
+      ctx.drawImage(ART_IMG, -artSz / 2, -artSz / 2, artSz, artSz);
+      ctx.restore();
+    }
+    ctx.restore();
+
+    // 7. Glowing Neon Title & Artist (y = 995..1140)
+    ctx.save();
+    ctx.globalAlpha = flicker;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `900 58px ${FONT_SANS}`;
+    const titleLines = wrapText(ctx, SCENE.title.toUpperCase(), W - 160, 2);
+    let ty = 1008;
+    for (const ln of titleLines) {
+      ctx.shadowColor = rgbStr(pink, 0.9);
+      ctx.shadowBlur = 22;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(ln, W / 2, ty);
+      ty += 66;
+    }
+    ctx.font = `700 36px ${FONT_MONO}`;
+    ctx.shadowColor = rgbStr(cyan, 0.95);
+    ctx.shadowBlur = 16;
+    ctx.fillStyle = rgbStr(cyan, 1);
+    ctx.fillText(SCENE.artist.toUpperCase(), W / 2, ty + 14);
+    ctx.restore();
+
+    // 8. 24-Band Glowing Neon Tube Spectrum (y = 1190..1320)
+    const nBars = 24, barW = 18, gap = 14;
+    const eqW = nBars * barW + (nBars - 1) * gap;
+    const eqX = (W - eqW) / 2;
+    const eqY = 1315;
+    ctx.save();
+    for (let b = 0; b < nBars; b++) {
+      const mag = audio.bands[b] || 0.1;
+      const h = 10 + mag * 105;
+      const c = mixColor(cyan, pink, b / (nBars - 1));
+      ctx.shadowColor = rgbStr(c, 0.9);
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = rgbStr(c, 0.95 * flicker);
+      roundRectPath(ctx, eqX + b * (barW + gap), eqY - h, barW, h, 8);
+      ctx.fill();
+      // White hot neon core line
+      ctx.fillStyle = "rgba(255,255,255,0.75)";
+      roundRectPath(ctx, eqX + b * (barW + gap) + 6, eqY - h + 4, barW - 12, Math.max(4, h - 8), 3);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    // 9. Neon-Bordered Trivia Card (y = 1352..1544)
+    const fact = getActiveFact(t);
+    if (fact) {
+      const fx = 80, fy = 1352, fw = 920, fh = 192;
+      ctx.save();
+      ctx.globalAlpha = fact.alpha;
+      roundRectPath(ctx, fx, fy, fw, fh, 22);
+      ctx.fillStyle = "rgba(10, 4, 28, 0.86)";
+      ctx.fill();
+      ctx.shadowColor = rgbStr(cyan, 0.85);
+      ctx.shadowBlur = 18;
+      ctx.strokeStyle = rgbStr(cyan, 0.9);
+      ctx.lineWidth = 3;
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = `700 22px ${FONT_MONO}`;
+      ctx.fillStyle = rgbStr(pink, 1);
+      ctx.fillText(`★ FACT 0${fact.slot.index + 1} / 0${fact.slot.total} ★`, W / 2, fy + 34);
+
+      ctx.font = `500 33px ${FONT_SANS}`;
+      ctx.fillStyle = "#f5f8ff";
+      const lines = wrapText(ctx, fact.slot.text, fw - 72, 3);
+      const lh = 42;
+      const sy = fy + 82 + ((3 - lines.length) * lh) / 4;
+      lines.forEach((ln, i) => ctx.fillText(ln, W / 2, sy + i * lh));
+      ctx.restore();
+    }
+
+    drawStationBug(t, audio, "neon");
+    drawFilmGrain(t, 0.14);
+  }
+
+  // =========================================================================
+  // STYLE 4: RISOGRAPH ZINE POSTER (Paper Grain, Halftone, Taped Print Collage)
+  // =========================================================================
+  function renderRiso(t, audio) {
+    const inkDark = [20, 22, 38];
+    const inkAccent = SCENE.palette.accent;
+    // Ensure accent has rich ink saturation on cream paper
+    const rInk = [
+      clamp(Math.round(inkAccent[0] * 0.85), 25, 225),
+      clamp(Math.round(inkAccent[1] * 0.72), 20, 190),
+      clamp(Math.round(inkAccent[2] * 0.85), 30, 215),
+    ];
+    const inkAlt = [228, 66, 52]; // Classic Risograph Fluorescent Red-Orange
+    const intro = easeOutBack(clamp(t / 0.95, 0, 1));
+
+    // 1. Warm Archival Cream Paper Background
+    ctx.fillStyle = "#f3ede0";
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle Halftone Dot Matrix
+    if (CACHE.halftone) {
+      ctx.fillStyle = CACHE.halftone;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // Large geometric risograph color wash behind artwork
+    ctx.save();
+    ctx.globalAlpha = 0.22 + audio.bass * 0.08;
+    ctx.fillStyle = rgbStr(rInk, 1);
+    ctx.beginPath();
+    ctx.arc(W / 2 + 120, 560, 380 + audio.onset * 28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = rgbStr(inkAlt, 0.16);
+    ctx.beginPath();
+    ctx.arc(W / 2 - 190, 740, 240 + audio.bass * 20, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+
+    // Editorial border rules
+    ctx.strokeStyle = rgbStr(inkDark, 0.85);
+    ctx.lineWidth = 4;
+    ctx.strokeRect(36, 120, W - 72, 1456);
+
+    // 2. Rubber-Stamp Chart Badge (top right-center)
+    ctx.save();
+    ctx.translate(W / 2 + 60, 206);
+    ctx.rotate(-0.045);
+    ctx.scale(intro, intro);
+    ctx.font = `800 28px ${FONT_MONO}`;
+    const bText = SCENE.chart_badge.toUpperCase();
+    const bw = Math.max(290, ctx.measureText(bText).width + 52);
+    ctx.fillStyle = rgbStr(inkAlt, 0.94);
+    ctx.fillRect(-bw / 2, -28, bw, 56);
+    ctx.strokeStyle = rgbStr(inkDark, 0.95);
+    ctx.lineWidth = 3.5;
+    ctx.strokeRect(-bw / 2 - 5, -33, bw + 10, 66);
+    ctx.fillStyle = "#f8f4ea";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(bText, 0, 1);
+    ctx.restore();
+
+    // 3. Offset Risograph Registration Plate + Taped Album Artwork (y ~ 310..870)
+    const artSz = 540;
+    const tilt = Math.sin(t * 0.7) * 0.015 - 0.025;
+    const pop = 1.0 + audio.onset * 0.018;
+    ctx.save();
+    ctx.translate(W / 2, 600);
+    ctx.rotate(tilt);
+    ctx.scale(intro * pop, intro * pop);
+
+    // Misregistered riso offset ink plate
+    ctx.fillStyle = rgbStr(inkAlt, 0.82);
+    ctx.fillRect(-artSz / 2 + 22, -artSz / 2 + 22, artSz, artSz);
+    ctx.fillStyle = rgbStr(inkDark, 0.92);
+    ctx.fillRect(-artSz / 2 - 12, -artSz / 2 - 12, artSz, artSz);
+
+    // Paper photo frame
+    ctx.fillStyle = "#fbf8f1";
+    ctx.fillRect(-artSz / 2 - 14, -artSz / 2 - 14, artSz + 28, artSz + 28);
+    ctx.strokeStyle = rgbStr(inkDark, 0.95);
+    ctx.lineWidth = 4;
+    ctx.strokeRect(-artSz / 2 - 14, -artSz / 2 - 14, artSz + 28, artSz + 28);
+
+    if (ART_IMG) {
+      ctx.drawImage(ART_IMG, -artSz / 2, -artSz / 2, artSz, artSz);
+    }
+
+    // Translucent masking tape strips at top-left and bottom-right corners
+    const drawTape = (tx, ty, ang) => {
+      ctx.save();
+      ctx.translate(tx, ty);
+      ctx.rotate(ang);
+      ctx.fillStyle = "rgba(235, 224, 188, 0.82)";
+      ctx.fillRect(-72, -18, 144, 36);
+      ctx.strokeStyle = "rgba(180, 165, 130, 0.45)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(-72, -18, 144, 36);
+      ctx.restore();
+    };
+    drawTape(-artSz / 2 + 12, -artSz / 2 - 8, -0.58);
+    drawTape(artSz / 2 - 12, artSz / 2 + 8, -0.52);
+    ctx.restore();
+
+    // 4. Bold Editorial Serif + Grotesk Title/Artist (y ~ 975..1140)
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `900 62px ${FONT_SERIF}`;
+    const titleLines = wrapText(ctx, SCENE.title, W - 160, 2);
+    let ty = 995;
+    for (const ln of titleLines) {
+      // Subtle riso ink offset shadow
+      ctx.fillStyle = rgbStr(inkAlt, 0.45);
+      ctx.fillText(ln, W / 2 + 4, ty + 4);
+      ctx.fillStyle = rgbStr(inkDark, 1);
+      ctx.fillText(ln, W / 2, ty);
+      ty += 68;
+    }
+    ctx.font = `800 34px ${FONT_MONO}`;
+    ctx.fillStyle = rgbStr(rInk, 1);
+    ctx.fillText(`— ${SCENE.artist.toUpperCase()} (${SCENE.year}) —`, W / 2, ty + 18);
+    ctx.restore();
+
+    // 5. Ink-Stamped 24-Band Risograph EQ Bars (y = 1190..1315)
+    const nBars = 24, barW = 20, gap = 12;
+    const eqW = nBars * barW + (nBars - 1) * gap;
+    const eqX = (W - eqW) / 2;
+    const eqY = 1310;
+    for (let b = 0; b < nBars; b++) {
+      const mag = audio.bands[b] || 0.1;
+      const h = 10 + mag * 96;
+      const bx = eqX + b * (barW + gap);
+      // Offset red-orange ink bar
+      ctx.fillStyle = rgbStr(inkAlt, 0.72);
+      ctx.fillRect(bx + 4, eqY - h + 4, barW, h);
+      // Primary dark ink bar
+      ctx.fillStyle = rgbStr(inkDark, 0.92);
+      ctx.fillRect(bx, eqY - h, barW, h);
+    }
+
+    // 6. Zine Cutout Trivia Card (y = 1352..1540)
+    const fact = getActiveFact(t);
+    if (fact) {
+      const stamp = easeOutBack(fact.enter);
+      const fx = 100, fy = 1352, fw = 880, fh = 186;
+      ctx.save();
+      ctx.globalAlpha = fact.alpha;
+      ctx.translate(fx + fw / 2, fy + fh / 2);
+      ctx.rotate(fact.slot.index % 2 === 0 ? -0.012 : 0.012);
+      ctx.scale(0.92 + 0.08 * stamp, 0.92 + 0.08 * stamp);
+
+      // Hard graphic offset shadow
+      ctx.fillStyle = rgbStr(inkDark, 0.92);
+      ctx.fillRect(-fw / 2 + 10, -fh / 2 + 10, fw, fh);
+
+      ctx.fillStyle = "#fcfaf3";
+      ctx.fillRect(-fw / 2, -fh / 2, fw, fh);
+      ctx.strokeStyle = rgbStr(inkDark, 0.95);
+      ctx.lineWidth = 4;
+      ctx.strokeRect(-fw / 2, -fh / 2, fw, fh);
+
+      // Label pill
+      ctx.fillStyle = rgbStr(inkDark, 1);
+      ctx.fillRect(-fw / 2 + 24, -fh / 2 + 18, 220, 32);
+      ctx.font = `700 20px ${FONT_MONO}`;
+      ctx.fillStyle = "#fcfaf3";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(`ZINE NOTE #${fact.slot.index + 1}/${fact.slot.total}`, -fw / 2 + 38, -fh / 2 + 34);
+
+      ctx.font = `600 32px ${FONT_SANS}`;
+      ctx.fillStyle = rgbStr(inkDark, 1);
+      const lines = wrapText(ctx, fact.slot.text, fw - 64, 3);
+      const lh = 41;
+      const sy = -fh / 2 + 80 + ((3 - lines.length) * lh) / 4;
+      lines.forEach((ln, i) => ctx.fillText(ln, -fw / 2 + 28, sy + i * lh));
+      ctx.restore();
+    }
+
+    drawStationBug(t, audio, "riso");
+    drawFilmGrain(t, 0.24);
+  }
+
+  // =========================================================================
+  // STYLE 5: KINETIC COLOR-BLOCK POSTER (bang-motion inspired)
+  // =========================================================================
+  function renderKinetic(t, audio) {
+    const primary = SCENE.palette.primary;
+    const accent = SCENE.palette.accent;
+    const brightAcc = brighten(accent, 1.3);
+    const intro = easeOutExpo(clamp(t / 0.85, 0, 1));
+
+    // 1. Bold Saturated Color-Block Fields slamming into place
+    ctx.fillStyle = "#0b0c12";
+    ctx.fillRect(0, 0, W, H);
+
+    // Top-right bold primary color field
+    ctx.fillStyle = rgbStr(primary, 0.94);
+    ctx.fillRect(W * (1 - intro), 0, W * intro, 930);
+
+    // Diagonal / lower contrasting accent stripe
+    ctx.fillStyle = rgbStr(accent, 0.92);
+    ctx.fillRect(0, 930, W * intro, 22);
+
+    // 2. Giant Cropped Kinetic Background Typography drifting in parallax
+    ctx.save();
+    ctx.font = `900 220px ${FONT_SANS}`;
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(255, 255, 255, 0.085)";
+    const drift1 = -((t * 90) % 1400);
+    const bigWord = `${SCENE.artist.toUpperCase()}  •  ${SCENE.year}  •  `;
+    ctx.fillText(bigWord + bigWord, drift1, 310);
+    const drift2 = ((t * 70) % 1400) - 1400;
+    ctx.fillStyle = "rgba(0, 0, 0, 0.16)";
+    ctx.fillText(bigWord + bigWord, drift2, 760);
+    ctx.restore();
+
+    // 3. Crisp High-Contrast Chart Badge
+    ctx.save();
+    ctx.globalAlpha = intro;
+    ctx.font = `900 28px ${FONT_SANS}`;
+    const bText = SCENE.chart_badge.toUpperCase();
+    const bw = Math.max(270, ctx.measureText(bText).width + 58);
+    const bx = (W - bw) / 2 + 26;
+    const by = 178;
+    ctx.fillStyle = "#0b0c12";
+    ctx.fillRect(bx, by, bw, 56);
+    ctx.fillStyle = rgbStr(brightAcc, 1);
+    ctx.fillRect(bx, by + 50, bw, 6);
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(bText, bx + bw / 2, by + 26);
+    ctx.restore();
+
+    // 4. Elevated Album Cover with Hard Graphic Shadow & Beat Pop (y = 295..855)
+    const artSz = 540;
+    const pop = (0.8 + 0.2 * easeOutBack(clamp((t - 0.1) / 0.8, 0, 1))) * (1.0 + audio.onset * 0.032);
+    ctx.save();
+    ctx.translate(W / 2, 585);
+    ctx.scale(pop, pop);
+
+    // Hard poster shadow
+    ctx.fillStyle = "#08090e";
+    ctx.fillRect(-artSz / 2 + 24, -artSz / 2 + 24, artSz, artSz);
+    // Bright accent border frame
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(-artSz / 2 - 10, -artSz / 2 - 10, artSz + 20, artSz + 20);
+    if (ART_IMG) {
+      ctx.drawImage(ART_IMG, -artSz / 2, -artSz / 2, artSz, artSz);
+    }
+    ctx.restore();
+
+    // 5. Bold Kinetic Title & Artist Block (y = 995..1160)
+    const slam = easeOutCubic(clamp((t - 0.2) / 0.65, 0, 1));
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    const tx = 86 + (1 - slam) * -90;
+    ctx.globalAlpha = slam;
+    ctx.font = `900 66px ${FONT_SANS}`;
+    const titleLines = wrapText(ctx, SCENE.title.toUpperCase(), W - 180, 2);
+    let ty = 1025;
+    for (const ln of titleLines) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(ln, tx, ty);
+      ty += 70;
+    }
+    ctx.font = `800 36px ${FONT_SANS}`;
+    ctx.fillStyle = rgbStr(brightAcc, 1);
+    ctx.fillText(SCENE.artist.toUpperCase(), tx, ty + 8);
+    ctx.restore();
+
+    // 6. Chunky Geometric 24-Band Pill Spectrum (y = 1205..1315)
+    const nBars = 24, barW = 24, gap = 12;
+    const eqW = nBars * barW + (nBars - 1) * gap;
+    const eqX = (W - eqW) / 2;
+    const eqY = 1316;
+    for (let b = 0; b < nBars; b++) {
+      const mag = audio.bands[b] || 0.1;
+      const h = 14 + mag * 96;
+      const bx = eqX + b * (barW + gap);
+      ctx.fillStyle = b % 2 === 0 ? rgbStr(brightAcc, 1) : "#ffffff";
+      roundRectPath(ctx, bx, eqY - h, barW, h, 4);
+      ctx.fill();
+    }
+
+    // 7. High-Contrast Color-Block Sliding Trivia Card (y = 1352..1544)
+    const fact = getActiveFact(t);
+    if (fact) {
+      const slideX = (1 - easeOutCubic(fact.enter)) * 120 - (1 - easeOutCubic(fact.exit)) * 120;
+      const fx = 76 + slideX, fy = 1352, fw = 928, fh = 190;
+      ctx.save();
+      ctx.globalAlpha = fact.alpha;
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(fx, fy, fw, fh);
+      ctx.fillStyle = rgbStr(accent, 1);
+      ctx.fillRect(fx, fy, 18, fh);
+
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.font = `900 22px ${FONT_MONO}`;
+      ctx.fillStyle = rgbStr(primary, 1);
+      ctx.fillText(`0${fact.slot.index + 1} // 0${fact.slot.total}  TRACK FACT`, fx + 40, fy + 36);
+
+      ctx.font = `700 33px ${FONT_SANS}`;
+      ctx.fillStyle = "#0b0c12";
+      const lines = wrapText(ctx, fact.slot.text, fw - 72, 3);
+      const lh = 42;
+      const sy = fy + 82 + ((3 - lines.length) * lh) / 4;
+      lines.forEach((ln, i) => ctx.fillText(ln, fx + 40, sy + i * lh));
+      ctx.restore();
+    }
+
+    drawStationBug(t, audio, "dark");
+    drawFilmGrain(t, 0.12);
+  }
+
+  // =========================================================================
+  // STYLE 6: CASSETTE / BOOMBOX DECK (Spinning Reels + Analog Amber VU Meters)
+  // =========================================================================
+  function renderCassette(t, audio) {
+    const accent = SCENE.palette.accent;
+    const amber = [255, 184, 58];
+    const intro = easeOutCubic(clamp(t / 1.0, 0, 1));
+    const progress = clamp(t / Math.max(1, SCENE.duration), 0, 1);
+
+    // 1. Dark Brushed Aluminum Stereo Chassis Backdrop
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, "#12141a");
+    bg.addColorStop(0.5, "#1a1d26");
+    bg.addColorStop(1, "#0b0d12");
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // Subtle ambient artwork glow behind deck
+    ctx.save();
+    ctx.globalAlpha = 0.35;
+    ctx.drawImage(CACHE.backdrop, 0, 0);
+    ctx.restore();
+
+    // Brushed metal horizontal micro-lines
+    ctx.fillStyle = "rgba(255,255,255,0.025)";
+    for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 1);
+
+    // 2. Top Metallic Chart Badge
+    ctx.save();
+    ctx.globalAlpha = intro;
+    ctx.font = `700 26px ${FONT_MONO}`;
+    const bText = `HIGH BIAS CrO2  •  ${SCENE.chart_badge.toUpperCase()}`;
+    const bw = Math.max(360, ctx.measureText(bText).width + 52);
+    const bx = (W - bw) / 2 + 28;
+    const by = 180;
+    roundRectPath(ctx, bx, by, bw, 52, 8);
+    ctx.fillStyle = "rgba(18, 20, 26, 0.88)";
+    ctx.fill();
+    ctx.strokeStyle = rgbStr(amber, 0.78);
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = rgbStr(amber, 1);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(bText, bx + bw / 2, by + 27);
+    ctx.restore();
+
+    // 3. Tactile 80s Compact Cassette Shell (y = 290..850)
+    const deckW = 880, deckH = 550;
+    const deckX = (W - deckW) / 2;
+    const deckY = 300 + (1 - intro) * 50;
+    ctx.save();
+    ctx.globalAlpha = intro;
+
+    // Outer cassette shell shadow + body
+    ctx.shadowColor = "rgba(0,0,0,0.75)";
+    ctx.shadowBlur = 42;
+    ctx.shadowOffsetY = 24;
+    roundRectPath(ctx, deckX, deckY, deckW, deckH, 30);
+    ctx.fillStyle = "#20232d";
+    ctx.fill();
+    ctx.shadowColor = "transparent";
+    ctx.strokeStyle = "rgba(255,255,255,0.22)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // Corner screws
+    const screwOffsets = [[30, 30], [deckW - 30, 30], [30, deckH - 30], [deckW - 30, deckH - 30]];
+    for (const [sx, sy] of screwOffsets) {
+      ctx.fillStyle = "#525866";
+      ctx.beginPath();
+      ctx.arc(deckX + sx, deckY + sy, 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#181a22";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(deckX + sx - 6, deckY + sy - 2);
+      ctx.lineTo(deckX + sx + 6, deckY + sy + 2);
+      ctx.stroke();
+    }
+
+    // Printed Cassette Sticker Label
+    const lblX = deckX + 48, lblY = deckY + 46, lblW = deckW - 96, lblH = 350;
+    roundRectPath(ctx, lblX, lblY, lblW, lblH, 16);
+    ctx.fillStyle = "#f2ecde";
+    ctx.fill();
+
+    // Accent color header band on cassette label
+    ctx.save();
+    roundRectPath(ctx, lblX, lblY, lblW, lblH, 16);
+    ctx.clip();
+    ctx.fillStyle = rgbStr(accent, 0.92);
+    ctx.fillRect(lblX, lblY, lblW, 88);
+    ctx.fillStyle = "#141620";
+    ctx.fillRect(lblX, lblY + 88, lblW, 10);
+
+    // Artwork thumbnail on left of label
+    if (ART_IMG) {
+      ctx.drawImage(ART_IMG, lblX + 18, lblY + 12, 72, 72);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(lblX + 18, lblY + 12, 72, 72);
+    }
+
+    // Label title & side A badge
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `900 32px ${FONT_SANS}`;
+    const shortTitle = SCENE.title.length > 26 ? SCENE.title.slice(0, 25) + "…" : SCENE.title;
+    ctx.fillText(shortTitle.toUpperCase(), lblX + 108, lblY + 34);
+    ctx.font = `700 22px ${FONT_MONO}`;
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.fillText(`${SCENE.artist.toUpperCase()}  •  ${SCENE.year}`, lblX + 108, lblY + 66);
+
+    ctx.textAlign = "right";
+    ctx.font = `900 28px ${FONT_MONO}`;
+    ctx.fillStyle = "#141620";
+    ctx.fillText("SIDE A", lblX + lblW - 22, lblY + 126);
+    ctx.font = `700 22px ${FONT_MONO}`;
+    ctx.fillStyle = "#484d5e";
+    ctx.fillText("C-60  DOLBY B", lblX + 24 + 170, lblY + 126);
+    ctx.restore();
+
+    // Central Smoked-Acrylic Tape Window with Dual Spinning Reels
+    const winX = lblX + 120, winY = lblY + 150, winW = lblW - 240, winH = 166;
+    roundRectPath(ctx, winX, winY, winW, winH, 82);
+    ctx.fillStyle = "#11131a";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    const drawReel = (rx, ry, tapeR, angle) => {
+      ctx.save();
+      ctx.translate(rx, ry);
+      // Dark magnetic tape pack
+      ctx.fillStyle = "#2b1d16";
+      ctx.beginPath();
+      ctx.arc(0, 0, tapeR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(180,120,70,0.22)";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, tapeR * 0.82, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Rotating white plastic hub & 6 sprocket teeth
+      ctx.rotate(angle);
+      ctx.fillStyle = "#e8eaf0";
+      ctx.beginPath();
+      ctx.arc(0, 0, 44, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#181a22";
+      ctx.beginPath();
+      ctx.arc(0, 0, 24, 0, Math.PI * 2);
+      ctx.fill();
+      for (let k = 0; k < 6; k++) {
+        const a = (k * Math.PI) / 3;
+        ctx.fillStyle = "#e8eaf0";
+        ctx.save();
+        ctx.rotate(a);
+        ctx.fillRect(-4, -26, 8, 12);
+        ctx.restore();
+      }
+      ctx.restore();
+    };
+
+    const leftTapeR = lerp(74, 52, progress);
+    const rightTapeR = lerp(52, 74, progress);
+    ctx.save();
+    roundRectPath(ctx, winX, winY, winW, winH, 82);
+    ctx.clip();
+    drawReel(winX + 120, winY + winH / 2, leftTapeR, -t * 3.1);
+    drawReel(winX + winW - 120, winY + winH / 2, rightTapeR, -t * 3.1);
+    ctx.restore();
+
+    // Bottom trapezoid tape head housing
+    ctx.fillStyle = "#181a22";
+    ctx.beginPath();
+    ctx.moveTo(deckX + 150, deckY + deckH);
+    ctx.lineTo(deckX + 195, deckY + deckH - 96);
+    ctx.lineTo(deckX + deckW - 195, deckY + deckH - 96);
+    ctx.lineTo(deckX + deckW - 150, deckY + deckH);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.16)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+
+    // 4. Twin Glowing Warm-Amber Analog VU Meters (y = 895..1125)
+    const drawVUMeter = (mx, my, mw, mh, level, label) => {
+      ctx.save();
+      // Warm backlit amber panel
+      roundRectPath(ctx, mx, my, mw, mh, 16);
+      const vuGrad = ctx.createRadialGradient(mx + mw / 2, my + mh, 20, mx + mw / 2, my + mh / 2, mw * 0.72);
+      vuGrad.addColorStop(0, "rgba(255, 208, 105, 0.94)");
+      vuGrad.addColorStop(0.75, "rgba(218, 140, 42, 0.88)");
+      vuGrad.addColorStop(1, "rgba(120, 68, 16, 0.92)");
+      ctx.fillStyle = vuGrad;
+      ctx.fill();
+      ctx.strokeStyle = "#3a3f4e";
+      ctx.lineWidth = 5;
+      ctx.stroke();
+
+      // Curved dB scale arc
+      const pivX = mx + mw / 2;
+      const pivY = my + mh + 26;
+      const arcR = mh * 0.95;
+      ctx.strokeStyle = "#1c140a";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(pivX, pivY, arcR, -Math.PI * 0.78, -Math.PI * 0.36);
+      ctx.stroke();
+      // Red overload zone
+      ctx.strokeStyle = "#d92222";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(pivX, pivY, arcR, -Math.PI * 0.36, -Math.PI * 0.22);
+      ctx.stroke();
+
+      // Scale ticks & dB markings
+      const ticks = [
+        { u: 0.05, txt: "-20" },
+        { u: 0.30, txt: "-10" },
+        { u: 0.55, txt: "-5" },
+        { u: 0.76, txt: "0" },
+        { u: 0.96, txt: "+3" },
+      ];
+      ctx.font = `700 17px ${FONT_MONO}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (const tk of ticks) {
+        const ang = lerp(-Math.PI * 0.77, -Math.PI * 0.23, tk.u);
+        const rIn = arcR - 10;
+        const rOut = arcR + 6;
+        ctx.strokeStyle = tk.u >= 0.76 ? "#c61a1a" : "#1c140a";
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(pivX + Math.cos(ang) * rIn, pivY + Math.sin(ang) * rIn);
+        ctx.lineTo(pivX + Math.cos(ang) * rOut, pivY + Math.sin(ang) * rOut);
+        ctx.stroke();
+        ctx.fillStyle = tk.u >= 0.76 ? "#b81414" : "#22170a";
+        ctx.fillText(tk.txt, pivX + Math.cos(ang) * (arcR - 26), pivY + Math.sin(ang) * (arcR - 26));
+      }
+
+      // Corner VU channel badge (clear of needle sweep)
+      ctx.fillStyle = "#1c140a";
+      ctx.font = `900 24px ${FONT_SANS}`;
+      ctx.textAlign = "left";
+      ctx.fillText(label, mx + 20, my + 26);
+
+      // Needle
+      const clamped = clamp(level, 0.04, 1.0);
+      const needleAng = lerp(-Math.PI * 0.77, -Math.PI * 0.24, clamped);
+      ctx.strokeStyle = "#181008";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(pivX, pivY);
+      ctx.lineTo(pivX + Math.cos(needleAng) * (arcR + 10), pivY + Math.sin(needleAng) * (arcR + 10));
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    const leftLvl = clamp(audio.bass * 0.75 + audio.rms * 0.35 + Math.sin(t * 9) * 0.05, 0.08, 0.98);
+    const rightLvl = clamp(audio.rms * 0.85 + audio.onset * 0.25 + Math.cos(t * 11) * 0.06, 0.08, 0.98);
+    drawVUMeter(100, 905, 420, 215, leftLvl, "VU  L");
+    drawVUMeter(560, 905, 420, 215, rightLvl, "VU  R");
+
+    // 5. Crisp Track Title / Artist below VU meters (y = 1175..1295)
+    ctx.save();
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `800 50px ${FONT_SANS}`;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(SCENE.title, W / 2, 1185);
+    ctx.font = `700 32px ${FONT_MONO}`;
+    ctx.fillStyle = rgbStr(amber, 1);
+    ctx.fillText(SCENE.artist.toUpperCase(), W / 2, 1246);
+    ctx.restore();
+
+    // 6. Amber VFD / LED-Display Trivia Panel (y = 1352..1544)
+    const fact = getActiveFact(t);
+    if (fact) {
+      const fx = 80, fy = 1352, fw = 920, fh = 190;
+      ctx.save();
+      ctx.globalAlpha = fact.alpha;
+      roundRectPath(ctx, fx, fy, fw, fh, 16);
+      ctx.fillStyle = "#0b0e14";
+      ctx.fill();
+      ctx.strokeStyle = rgbStr(amber, 0.72);
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.font = `700 22px ${FONT_MONO}`;
+      ctx.fillStyle = rgbStr(amber, 0.95);
+      ctx.shadowColor = rgbStr(amber, 0.65);
+      ctx.shadowBlur = 10;
+      ctx.fillText(`LINER NOTES  //  0${fact.slot.index + 1} OF 0${fact.slot.total}`, fx + 34, fy + 36);
+      ctx.shadowBlur = 0;
+
+      ctx.font = `500 32px ${FONT_SANS}`;
+      ctx.fillStyle = "#fff5dc";
+      const lines = wrapText(ctx, fact.slot.text, fw - 68, 3);
+      const lh = 41;
+      const sy = fy + 82 + ((3 - lines.length) * lh) / 4;
+      lines.forEach((ln, i) => ctx.fillText(ln, fx + 34, sy + i * lh));
+      ctx.restore();
+    }
+
+    drawStationBug(t, audio, "dark");
+    drawFilmGrain(t, 0.16);
+  }
+
+  // --- Global Render Dispatcher ---
+  window.initScene = async (payload) => {
+    SCENE = payload;
+    ART_IMG = await loadImage(payload.artwork_data_url);
+    LOGO_IMG = await loadImage(payload.logo_data_url);
+    CACHE = {
+      backdrop: buildBlurredBackdrop(),
+      noiseTile: buildNoiseTile(256, 30),
+      vinylDisc: buildVinylDiscCanvas(560),
+      particles: buildParticles(46),
+      halftone: buildHalftonePattern("rgba(20, 22, 38, 0.085)", 14),
+    };
+    window.READY = true;
+    return true;
+  };
+
+  window.render = (t) => {
+    if (!SCENE) return;
+    const audio = getAudioAt(t);
+    const style = SCENE.style || "hifi";
+
+    ctx.save();
+    if (style === "vhs") renderVHS(t, audio);
+    else if (style === "neon") renderNeon(t, audio);
+    else if (style === "riso") renderRiso(t, audio);
+    else if (style === "kinetic") renderKinetic(t, audio);
+    else if (style === "cassette") renderCassette(t, audio);
+    else renderHiFi(t, audio);
+
+    // Graceful 0.6s outro fade to black so clips loop/end cleanly
+    const rem = SCENE.duration - t;
+    if (rem < 0.65 && rem >= 0) {
+      const fade = 1.0 - clamp(rem / 0.65, 0, 1);
+      ctx.fillStyle = `rgba(6, 7, 12, ${fade * 0.92})`;
+      ctx.fillRect(0, 0, W, H);
+    }
+    ctx.restore();
+  };
+})();
+</script>
+</body>
+</html>

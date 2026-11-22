@@ -609,12 +609,12 @@ async function loadSettings() {
   document.getElementById("set-jitter").value = settings.jitter_minutes || "30";
   document.getElementById("set-wildcard").value = settings.wildcard_chance || "25";
   document.getElementById("wildcard-val").textContent = settings.wildcard_chance || "25";
-  const defaultTemplate = settings.default_template || "vinyl";
+  const defaultTemplate = settings.default_template || "auto";
   const eraAppropriate = settings.era_appropriate_template === "true";
   syncTemplateControls(defaultTemplate, eraAppropriate);
   syncAutoQueueControls(settings.auto_queue_on_generate === "true");
-  document.getElementById("set-wm-opacity").value = settings.watermark_opacity || "0.40";
-  document.getElementById("wm-val").textContent = settings.watermark_opacity || "0.40";
+  document.getElementById("set-wm-opacity").value = settings.watermark_opacity || "0.65";
+  document.getElementById("wm-val").textContent = settings.watermark_opacity || "0.65";
   document.getElementById("set-auto-publish").checked = settings.auto_publish === "true";
 }
 

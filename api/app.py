@@ -158,6 +158,12 @@ def api_status():
     }
 
 
+@app.get("/api/styles")
+def api_styles():
+    from core.styles import get_style_metadata
+    return {"styles": get_style_metadata()}
+
+
 @app.post("/api/generate")
 def api_generate(req: GenerateRequest):
     with gen_lock:
