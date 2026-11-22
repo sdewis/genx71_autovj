@@ -21,7 +21,7 @@ document.querySelectorAll(".nav-btn").forEach((btn) => {
     if (target === "queue") loadQueue();
     if (target === "posts") loadPosts();
     if (target === "tracks") loadTracks();
-    if (target === "admin") { loadSettings(); loadBlacklist(); }
+    if (target === "admin") { loadSettings(); loadBlacklist(); loadVoiceProfiles(); }
   });
 });
 
@@ -77,11 +77,17 @@ async function triggerGeneration(opts = {}) {
   }
   const eraAppropriate = document.getElementById("gen-era-appropriate").checked;
   const autoQueue = document.getElementById("gen-auto-queue").checked;
+  const ttsEnabled = Boolean(document.getElementById("gen-tts-enabled")?.checked);
+  const voiceRegion = document.getElementById("gen-voice-region")?.value || null;
+  const customHookText = (document.getElementById("gen-custom-hook")?.value || "").trim() || null;
   const template = document.getElementById("gen-template").value;
   const payload = {
     template: eraAppropriate ? null : template,
     era_appropriate: eraAppropriate,
     auto_queue: autoQueue,
+    tts_enabled: ttsEnabled,
+    voice_region: ttsEnabled ? voiceRegion : null,
+    custom_hook_text: ttsEnabled ? customHookText : null,
     ...opts
   };
 
@@ -91,11 +97,28 @@ async function triggerGeneration(opts = {}) {
     body: JSON.stringify(payload)
   });
 
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    const err = await res.json();
-    alert(err.detail || "Failed to start generation");
+    alert(data.detail || "Failed to start generation");
     return;
   }
+
+  if (data.queued_tts && data.post) {
+    const customInput = document.getElementById("gen-custom-hook");
+    if (customInput) customInput.value = "";
+    const box = document.getElementById("gen-progress-box");
+    const fill = document.getElementById("gen-progress-fill");
+    const msg = document.getElementById("gen-progress-msg");
+    if (box && fill && msg) {
+      box.classList.remove("hidden");
+      fill.style.width = "15%";
+      msg.textContent = `🎙️ Queued "${data.post.artist} — ${data.post.title}" as TTS pending (${(data.post.voice_region || "uk").toUpperCase()} voice). Track progress in History.`;
+    }
+    refreshStatus();
+    loadPosts();
+    return;
+  }
+
   startProgressPolling();
 }
 
@@ -213,6 +236,35 @@ async function persistAutoQueueSetting(autoQueue) {
 document.getElementById("gen-auto-queue").addEventListener("change", (e) => {
   syncAutoQueueControls(e.target.checked);
   persistAutoQueueSetting(e.target.checked);
+});
+
+function syncTtsEnabledControls(enabled) {
+  const checked = Boolean(enabled);
+  ["gen-tts-enabled", "set-tts-enabled"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.checked = checked;
+  });
+  const optsBox = document.getElementById("gen-tts-options");
+  if (optsBox) optsBox.classList.toggle("hidden", !checked);
+}
+
+async function persistTtsEnabledSetting(enabled) {
+  try {
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        settings: { tts_enabled: enabled ? "true" : "false" }
+      })
+    });
+  } catch (e) {
+    console.error("Failed to save TTS enabled setting", e);
+  }
+}
+
+document.getElementById("gen-tts-enabled")?.addEventListener("change", (e) => {
+  syncTtsEnabledControls(e.target.checked);
+  persistTtsEnabledSetting(e.target.checked);
 });
 
 document.getElementById("btn-gen-random").addEventListener("click", () => triggerGeneration({ force_wildcard: false }));
@@ -473,6 +525,8 @@ document.getElementById("btn-clear-queue").addEventListener("click", async () =>
 });
 
 // --- Posts History ---
+let postsAutoPollTimer = null;
+
 async function loadPosts() {
   const res = await fetch("/api/posts");
   const data = await res.json();
@@ -484,38 +538,107 @@ async function loadPosts() {
     return;
   }
 
+  let hasActiveJobs = false;
+
   data.posts.forEach((p) => {
     const el = document.createElement("div");
     el.className = "item-card";
+    const status = p.status || "rendered";
+    if (status === "tts_pending" || status === "rendering") {
+      hasActiveJobs = true;
+    }
+
     const statusCls =
-      p.status === "posted" ? "badge-posted"
-      : p.status === "failed" ? "badge-failed"
-      : p.status === "scheduled" ? "badge-queued"
+      status === "posted" ? "badge-posted"
+      : (status === "failed" || status === "tts_failed") ? "badge-failed"
+      : status === "scheduled" ? "badge-queued"
+      : status === "tts_pending" ? "badge-tts-pending"
+      : status === "rendering" ? "badge-rendering"
       : "";
-    const statusText = p.status === "scheduled"
-      ? `QUEUED${p.queue_position ? ` #${p.queue_position}` : ""}`
-      : p.status.toUpperCase();
+    const statusText =
+      status === "scheduled" ? `QUEUED${p.queue_position ? ` #${p.queue_position}` : ""}`
+      : status === "tts_pending" ? "TTS PENDING"
+      : status === "tts_failed" ? "TTS FAILED"
+      : status === "rendering" ? "RENDERING"
+      : status.toUpperCase();
+
     const safeArtist = (p.artist || "").replace(/'/g, "\\'");
     const safeTitle = (p.title || "").replace(/'/g, "\\'");
     const safeBadge = (p.chart_info || "").replace(/'/g, "\\'");
-    const queueBtn = p.status === "scheduled"
-      ? `<button class="btn-small" onclick="document.querySelector('[data-tab=&quot;queue&quot;]').click()">📅 Queued</button>`
-      : `<button class="btn-small" onclick="queuePostForNext(${p.id})">📅 Queue</button>`;
+    const voiceTag = p.voice_region ? ` • 🎙️ ${p.voice_region.toUpperCase()}` : "";
+    const hookHtml = p.hook_text ? `<div class="tts-hook-preview">"${p.hook_text}"</div>` : "";
+    const errHtml = p.error_message && (status === "tts_failed" || status === "failed")
+      ? `<div class="item-sub" style="color:var(--danger); margin-top:4px;">${p.error_message}</div>`
+      : "";
+
+    let actionsHtml = "";
+    if (status === "tts_failed") {
+      actionsHtml = `
+        <button class="btn-small" onclick="retryPostTTS(${p.id})">🔄 Retry TTS</button>
+        <button class="btn-small" onclick="renderPostWithoutTTS(${p.id})">🎬 No TTS</button>
+      `;
+    } else if (status === "tts_pending" || status === "rendering") {
+      actionsHtml = `<button class="btn-small" onclick="renderPostWithoutTTS(${p.id})" title="Skip TTS and render now">⏭️ Skip TTS</button>`;
+    } else {
+      const queueBtn = status === "scheduled"
+        ? `<button class="btn-small" onclick="document.querySelector('[data-tab=&quot;queue&quot;]').click()">📅 Queued</button>`
+        : `<button class="btn-small" onclick="queuePostForNext(${p.id})">📅 Queue</button>`;
+      actionsHtml = `
+        ${p.video_url ? `<button class="btn-small" onclick="previewFromList('${p.video_url}', '${safeArtist}', '${safeTitle}', '${safeBadge}', ${p.id})">▶️</button>` : ""}
+        ${p.video_url ? queueBtn : ""}
+        ${p.video_url ? `<button class="btn-small btn-publish-post" ${publishPollTimer ? "disabled" : ""} onclick="publishPost(${p.id})">🚀 Post</button>` : ""}
+      `;
+    }
+
     el.innerHTML = `
       <div class="item-info">
         <div class="item-title">${p.artist} — ${p.title}</div>
-        <div class="item-sub">${p.chart_info} • Template: ${p.template_used}</div>
+        <div class="item-sub">${p.chart_info} • Template: ${p.template_used}${voiceTag}</div>
         <span class="badge ${statusCls}">${statusText}</span>
+        ${hookHtml}
+        ${errHtml}
       </div>
       <div class="item-actions">
-        ${p.video_url ? `<button class="btn-small" onclick="previewFromList('${p.video_url}', '${safeArtist}', '${safeTitle}', '${safeBadge}', ${p.id})">▶️</button>` : ""}
-        ${queueBtn}
-        <button class="btn-small btn-publish-post" ${publishPollTimer ? "disabled" : ""} onclick="publishPost(${p.id})">🚀 Post</button>
+        ${actionsHtml}
       </div>
     `;
     list.appendChild(el);
   });
+
+  if (hasActiveJobs && !postsAutoPollTimer) {
+    postsAutoPollTimer = setInterval(() => {
+      const postsTab = document.getElementById("tab-posts");
+      if (postsTab && postsTab.classList.contains("active")) {
+        loadPosts();
+      }
+    }, 8000);
+  } else if (!hasActiveJobs && postsAutoPollTimer) {
+    clearInterval(postsAutoPollTimer);
+    postsAutoPollTimer = null;
+  }
 }
+
+window.retryPostTTS = async (postId) => {
+  const res = await fetch(`/api/posts/${postId}/retry-tts`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(err.detail || "Failed to retry TTS");
+    return;
+  }
+  loadPosts();
+  refreshStatus();
+};
+
+window.renderPostWithoutTTS = async (postId) => {
+  const res = await fetch(`/api/posts/${postId}/render-no-tts`, { method: "POST" });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    alert(err.detail || "Failed to start fallback render");
+    return;
+  }
+  loadPosts();
+  refreshStatus();
+};
 
 window.previewFromList = (url, artist, title, badge, id) => {
   currentPreviewPostId = id;
@@ -613,6 +736,7 @@ async function loadSettings() {
   const eraAppropriate = settings.era_appropriate_template === "true";
   syncTemplateControls(defaultTemplate, eraAppropriate);
   syncAutoQueueControls(settings.auto_queue_on_generate === "true");
+  syncTtsEnabledControls(settings.tts_enabled === "true");
   document.getElementById("set-wm-opacity").value = settings.watermark_opacity || "0.65";
   document.getElementById("wm-val").textContent = settings.watermark_opacity || "0.65";
   document.getElementById("set-auto-publish").checked = settings.auto_publish === "true";
@@ -635,6 +759,11 @@ document.getElementById("set-auto-queue").addEventListener("change", (e) => {
   persistAutoQueueSetting(e.target.checked);
 });
 
+document.getElementById("set-tts-enabled")?.addEventListener("change", (e) => {
+  syncTtsEnabledControls(e.target.checked);
+  persistTtsEnabledSetting(e.target.checked);
+});
+
 document.getElementById("set-wildcard").addEventListener("input", (e) => {
   document.getElementById("wildcard-val").textContent = e.target.value;
 });
@@ -648,6 +777,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   const defaultTemplate = document.getElementById("set-template").value;
   const eraAppropriate = document.getElementById("set-era-appropriate").checked;
   const autoQueue = document.getElementById("set-auto-queue").checked;
+  const ttsEnabled = Boolean(document.getElementById("set-tts-enabled")?.checked);
   const payload = {
     settings: {
       schedule_enabled: document.getElementById("set-sched-enabled").checked ? "true" : "false",
@@ -657,6 +787,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
       default_template: defaultTemplate,
       era_appropriate_template: eraAppropriate ? "true" : "false",
       auto_queue_on_generate: autoQueue ? "true" : "false",
+      tts_enabled: ttsEnabled ? "true" : "false",
       watermark_opacity: document.getElementById("set-wm-opacity").value,
       auto_publish: document.getElementById("set-auto-publish").checked ? "true" : "false"
     }
@@ -668,6 +799,7 @@ document.getElementById("settings-form").addEventListener("submit", async (e) =>
   });
   syncTemplateControls(defaultTemplate, eraAppropriate);
   syncAutoQueueControls(autoQueue);
+  syncTtsEnabledControls(ttsEnabled);
   alert("Schedule & settings saved!");
   refreshStatus();
 });
@@ -819,6 +951,138 @@ window.unblock = async (id) => {
   await fetch(`/api/blacklist/${id}`, { method: "DELETE" });
   loadBlacklist();
   refreshStatus();
+};
+
+// --- Regional Voice Profile Studio (UK / US) ---
+function setVoiceMsg(text, level = "muted") {
+  const el = document.getElementById("tts-voice-msg");
+  if (!el) return;
+  el.textContent = text;
+  el.className = level === "ok" ? "status-ok" : level === "err" ? "status-err" : "muted";
+}
+
+function renderVoiceProfileRegion(region, profile) {
+  const badge = document.getElementById(`voice-${region}-badge`);
+  const list = document.getElementById(`voice-${region}-list`);
+  if (!badge || !list) return;
+
+  const clips = (profile && profile.clips) || [];
+  badge.textContent = clips.length ? `${clips.length} clip${clips.length > 1 ? "s" : ""} (${profile.total_duration}s)` : "No clips";
+  badge.className = `badge ${clips.length ? "badge-posted" : ""}`;
+
+  list.innerHTML = "";
+  if (!clips.length) {
+    list.innerHTML = `<p class="muted" style="margin:0;">Upload a 10–30s clean voice clip.</p>`;
+    return;
+  }
+
+  clips.forEach((c) => {
+    const row = document.createElement("div");
+    row.className = "voice-clip-row";
+    const safeFile = c.filename.replace(/'/g, "\\'");
+    row.innerHTML = `
+      <span class="voice-clip-name" title="${c.filename}">${c.filename} (${c.duration}s)</span>
+      <button type="button" class="btn-small btn-danger-outline" onclick="deleteVoiceClip('${region}', '${safeFile}')">🗑️</button>
+    `;
+    list.appendChild(row);
+  });
+}
+
+async function loadVoiceProfiles() {
+  try {
+    const res = await fetch("/api/tts/status");
+    const data = await res.json();
+    const pill = document.getElementById("tts-worker-pill");
+    if (pill && data.worker) {
+      if (data.worker.online) {
+        pill.textContent = data.worker.busy ? "TTS Worker: Synthesizing" : "TTS Worker: Ready";
+        pill.className = "pill pill-ok";
+      } else {
+        pill.textContent = "TTS Worker: Offline";
+        pill.className = "pill pill-warn";
+      }
+    }
+    if (data.profiles) {
+      renderVoiceProfileRegion("uk", data.profiles.uk);
+      renderVoiceProfileRegion("us", data.profiles.us);
+    }
+  } catch (e) {
+    console.error("Failed to load TTS voice profiles", e);
+  }
+}
+
+async function uploadVoiceFile(region, file) {
+  if (!file) return;
+  setVoiceMsg(`Converting & normalizing ${file.name} for ${region.toUpperCase()} voice...`, "muted");
+  const form = new FormData();
+  form.append("file", file);
+  try {
+    const res = await fetch(`/api/tts/voices/${region}`, { method: "POST", body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setVoiceMsg(data.detail || `Upload failed (HTTP ${res.status})`, "err");
+      return;
+    }
+    setVoiceMsg(`Saved ${region.toUpperCase()} clip: ${data.clip.filename} (${data.clip.duration}s)`, "ok");
+    if (data.profiles) {
+      renderVoiceProfileRegion("uk", data.profiles.uk);
+      renderVoiceProfileRegion("us", data.profiles.us);
+    }
+  } catch (err) {
+    setVoiceMsg(`Voice upload failed: ${err.message || err}`, "err");
+  }
+}
+
+document.getElementById("voice-uk-input")?.addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) uploadVoiceFile("uk", f);
+  e.target.value = "";
+});
+
+document.getElementById("voice-us-input")?.addEventListener("change", (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) uploadVoiceFile("us", f);
+  e.target.value = "";
+});
+
+window.deleteVoiceClip = async (region, filename) => {
+  if (!confirm(`Delete ${region.toUpperCase()} voice clip "${filename}"?`)) return;
+  const res = await fetch(`/api/tts/voices/${region}/${encodeURIComponent(filename)}`, { method: "DELETE" });
+  const data = await res.json().catch(() => ({}));
+  if (res.ok && data.profiles) {
+    renderVoiceProfileRegion("uk", data.profiles.uk);
+    renderVoiceProfileRegion("us", data.profiles.us);
+    setVoiceMsg(`Deleted ${filename}.`, "muted");
+  }
+};
+
+window.testVoiceProfile = async (region) => {
+  const btn = document.getElementById(`btn-test-${region}`);
+  const audioEl = document.getElementById("tts-test-audio");
+  if (btn) btn.disabled = true;
+  setVoiceMsg(`Synthesizing ${region.toUpperCase()} test clip on CPU (may take 30–90s)...`, "muted");
+  try {
+    const res = await fetch("/api/tts/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ region }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      setVoiceMsg(data.detail || `Test synthesis failed (HTTP ${res.status})`, "err");
+      return;
+    }
+    setVoiceMsg(`Synthesized ${data.duration}s ${region.toUpperCase()} preview in ${data.elapsed_sec}s!`, "ok");
+    if (audioEl && data.audio_url) {
+      audioEl.src = data.audio_url;
+      audioEl.classList.remove("hidden");
+      audioEl.play().catch(() => {});
+    }
+  } catch (err) {
+    setVoiceMsg(`Test failed: ${err.message || err}`, "err");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 };
 
 // Initial load

@@ -144,7 +144,9 @@ MIN_CLIP_DURATION = 30.0
 TARGET_CLIP_DURATION = 40.0
 MIN_FULL_TRACK_CLIP = 35.0
 MAX_FULL_TRACK_CLIP = 45.0
-MAX_CLIP_DURATION = 55.0  # Safely below TikTok's 60s automated copyright mute threshold
+MAX_CLIP_DURATION = 58.5  # Safely below TikTok's 60s automated copyright mute threshold
+TARGET_TTS_TOTAL_DURATION = 58.0  # As close to 59s as possible when full track is available
+
 
 
 def find_intelligent_clip_window(
@@ -345,22 +347,124 @@ def extract_audio_features(wav_path: str, fps: int = 30, n_bands: int = 24) -> D
     }
 
 
-def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None) -> Dict[str, object]:
+def mix_radio_ramp_audio(
+    raw_track_wav: str,
+    hook_start_sec: float,
+    tts_wav_path: str,
+    out_wav_path: str,
+    target_total_duration: float = TARGET_TTS_TOTAL_DURATION,
+) -> Dict[str, float]:
     """
-    Source, clip, and normalize a 35-45s audio hook (strictly >=30s and <58s for TikTok's 60s rule).
-    Prioritizes full-track yt-dlp sourcing; falls back to Deezer/iTunes 30s previews (padded to >=30s if needed).
-    Returns dict with: audio_path, source_url, duration, rms_envelope, audio_features.
+    Classic Radio-DJ 'Talk Up the Post' audio mix:
+      - Backs up start_sec by tts_duration so the full-volume track hook hits right
+        where it normally would as soon as the DJ finishes speaking.
+      - Plays the pre-roll track ducked (~-13 dB) with a warm low-pass filter (1850 Hz)
+        that crossfades seamlessly into crisp 100% full-range stereo right as TTS ends.
+      - Targets up to ~58.0s total (strictly <= 58.5s, safely below TikTok's 60s limit).
+      - Falls back cleanly to ducking the opening seconds if source is a 30s preview
+        or hook_start_sec < tts_duration.
+    """
+    raw_samples, raw_sr = _load_wav_mono(raw_track_wav)
+    raw_dur = len(raw_samples) / float(raw_sr or 44100)
+
+    tts_samples, tts_sr = _load_wav_mono(tts_wav_path)
+    tts_dur = max(0.5, len(tts_samples) / float(tts_sr or 44100))
+
+    # Back up start_sec by tts_dur so full volume lands on hook_start_sec
+    pre_roll_start = max(0.0, hook_start_sec - tts_dur)
+    avail_dur = max(1.0, raw_dur - pre_roll_start)
+    desired_dur = min(MAX_CLIP_DURATION, max(MIN_CLIP_DURATION, float(target_total_duration)))
+    raw_clip_dur = min(avail_dur, desired_dur)
+
+    # If remaining track after pre_roll_start is shorter than desired, shift start earlier if possible
+    if raw_clip_dur < desired_dur and raw_dur > raw_clip_dur:
+        shift_back = min(pre_roll_start, desired_dur - raw_clip_dur)
+        pre_roll_start = max(0.0, pre_roll_start - shift_back)
+        raw_clip_dur = min(raw_dur - pre_roll_start, desired_dur)
+
+    out_dur = raw_clip_dur
+    pad_filter = ""
+    if raw_clip_dur < MIN_CLIP_DURATION:
+        out_dur = MIN_CLIP_DURATION + 0.5
+        pad_filter = f",apad=whole_dur={out_dur:.2f}"
+
+    fade_out_start = max(0.0, raw_clip_dur - 1.2)
+    ramp_end = min(tts_dur, max(0.6, out_dur - 1.5))
+    xfade = min(0.45, max(0.15, ramp_end * 0.15))
+    main_trim_start = max(0.0, ramp_end - xfade)
+
+    filter_complex = (
+        f"[0:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+        f"afade=t=in:st=0:d=0.35,"
+        f"afade=t=out:st={fade_out_start:.2f}:d=1.2,"
+        f"loudnorm=I=-14:TP=-1.5:LRA=11{pad_filter},"
+        f"asplit=2[m_pre][m_main];"
+        f"[m_pre]atrim=0:{ramp_end:.3f},asetpts=PTS-STARTPTS,"
+        f"lowpass=f=1850:poles=2,volume=-13dB[bed_pre];"
+        f"[m_main]atrim={main_trim_start:.3f},asetpts=PTS-STARTPTS[bed_main];"
+        f"[bed_pre][bed_main]acrossfade=d={xfade:.3f}:c1=tri:c2=tri[bed];"
+        f"[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
+        f"volume=1.15[vox];"
+        f"[bed][vox]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        f"alimiter=limit=0.95[out]"
+    )
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-ss", f"{pre_roll_start:.2f}",
+            "-t", f"{raw_clip_dur:.2f}",
+            "-i", raw_track_wav,
+            "-i", tts_wav_path,
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-t", f"{out_dur:.2f}",
+            "-ar", "44100", "-ac", "2",
+            out_wav_path,
+        ],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    final_samples, final_sr = _load_wav_mono(out_wav_path)
+    return {
+        "duration": round(len(final_samples) / float(final_sr or 44100), 2),
+        "tts_duration": round(tts_dur, 2),
+        "pre_roll_start": round(pre_roll_start, 2),
+        "hook_start": round(hook_start_sec, 2),
+    }
+
+
+def prepare_track_audio(
+    artist: str,
+    title: str,
+    cache_dir: Optional[str] = None,
+    tts_audio_path: Optional[str] = None,
+    target_total_duration: Optional[float] = None,
+) -> Dict[str, object]:
+    """
+    Source, clip, and normalize track audio (strictly >=30s and <=58.5s for TikTok's 60s rule).
+    - Without tts_audio_path: clips a 35-45s hook (cached as <slug>_clip.wav).
+    - With tts_audio_path: backs up start_sec by tts_duration ('talk up the post' radio ramp),
+      mixes ducked low-pass pre-roll into full-volume drop, and targets ~58s total where available.
+    Returns dict with: audio_path, source_url, duration, rms_envelope, audio_features, tts_duration.
     """
     target_dir = cache_dir or CACHE_DIR
     os.makedirs(target_dir, exist_ok=True)
     slug = _slugify(f"{artist}_{title}")
-    final_wav = os.path.join(target_dir, f"{slug}_clip.wav")
+    has_tts = bool(tts_audio_path and os.path.exists(tts_audio_path))
+    if has_tts:
+        tts_tag = _slugify(os.path.splitext(os.path.basename(tts_audio_path))[0])[-18:]
+        final_wav = os.path.join(target_dir, f"{slug}_tts_{tts_tag}.wav")
+    else:
+        final_wav = os.path.join(target_dir, f"{slug}_clip.wav")
 
-    # Reuse cached clip only if it meets the >=30s and <58s duration bounds
-    if os.path.exists(final_wav) and os.path.getsize(final_wav) > 50000:
+    # Reuse cached clip only when not doing a fresh TTS radio-ramp mix
+    if not has_tts and os.path.exists(final_wav) and os.path.getsize(final_wav) > 50000:
         samples, sr = _load_wav_mono(final_wav)
         cached_dur = round(len(samples) / sr, 2)
-        if MIN_CLIP_DURATION <= cached_dur <= MAX_CLIP_DURATION + 3.0:
+        if MIN_CLIP_DURATION <= cached_dur <= MAX_CLIP_DURATION + 0.5:
             features = extract_audio_features(final_wav, fps=30)
             return {
                 "audio_path": final_wav,
@@ -368,6 +472,7 @@ def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None
                 "duration": cached_dur,
                 "rms_envelope": features["rms"],
                 "audio_features": features,
+                "tts_duration": 0.0,
             }
         logger.info(f"Cached clip for {artist} - {title} is {cached_dur}s (< {MIN_CLIP_DURATION}s); re-sourcing.")
 
@@ -377,7 +482,7 @@ def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None
     yt_out = None
     source_url = None
 
-    # 1. Prioritize yt-dlp full track so we can clip a clean 35-45s hook
+    # 1. Prioritize yt-dlp full track so we can clip up to ~58s with pre-roll room
     yt_out = fetch_youtube_audio(artist, title, yt_base)
     if yt_out:
         source_url = "youtube_full"
@@ -399,33 +504,55 @@ def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None
             "-ar", "44100", "-ac", "2", raw_wav
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-    start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=TARGET_CLIP_DURATION)
-    raw_clip_dur = max(1.0, min(MAX_CLIP_DURATION, end_sec - start_sec))
-    fade_out_start = max(0.0, raw_clip_dur - 1.2)
-
-    # Guarantee final clip duration is strictly >= 30.0s (e.g. pad slightly if a preview is 29.7s)
-    af_filters = [
-        "afade=t=in:st=0:d=0.4",
-        f"afade=t=out:st={fade_out_start:.2f}:d=1.2",
-        "loudnorm=I=-14:TP=-1.5:LRA=11",
-    ]
-    if raw_clip_dur < MIN_CLIP_DURATION:
-        pad_dur = MIN_CLIP_DURATION + 0.5
-        af_filters.append(f"apad=whole_dur={pad_dur:.2f}")
-        out_dur = pad_dur
+    tts_duration = 0.0
+    if has_tts:
+        # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp
+        tts_samples, tts_sr = _load_wav_mono(tts_audio_path)
+        est_tts_dur = max(0.5, len(tts_samples) / float(tts_sr or 44100))
+        desired_total = float(target_total_duration or TARGET_TTS_TOTAL_DURATION)
+        main_target = max(MIN_CLIP_DURATION, min(MAX_CLIP_DURATION - est_tts_dur, desired_total - est_tts_dur))
+        hook_start, _ = find_intelligent_clip_window(
+            raw_wav,
+            target_duration=main_target,
+            min_duration=min(MIN_CLIP_DURATION, main_target),
+            max_duration=min(MAX_CLIP_DURATION, main_target + 2.0),
+        )
+        mix_info = mix_radio_ramp_audio(
+            raw_track_wav=raw_wav,
+            hook_start_sec=hook_start,
+            tts_wav_path=tts_audio_path,
+            out_wav_path=final_wav,
+            target_total_duration=desired_total,
+        )
+        tts_duration = mix_info["tts_duration"]
     else:
-        out_dur = raw_clip_dur
+        start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=TARGET_CLIP_DURATION)
+        raw_clip_dur = max(1.0, min(MAX_CLIP_DURATION, end_sec - start_sec))
+        fade_out_start = max(0.0, raw_clip_dur - 1.2)
 
-    subprocess.run([
-        "ffmpeg", "-y",
-        "-ss", str(start_sec),
-        "-t", f"{raw_clip_dur:.2f}",
-        "-i", raw_wav,
-        "-af", ",".join(af_filters),
-        "-t", f"{out_dur:.2f}",
-        "-ar", "44100", "-ac", "2",
-        final_wav
-    ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Guarantee final clip duration is strictly >= 30.0s (e.g. pad slightly if a preview is 29.7s)
+        af_filters = [
+            "afade=t=in:st=0:d=0.4",
+            f"afade=t=out:st={fade_out_start:.2f}:d=1.2",
+            "loudnorm=I=-14:TP=-1.5:LRA=11",
+        ]
+        if raw_clip_dur < MIN_CLIP_DURATION:
+            pad_dur = MIN_CLIP_DURATION + 0.5
+            af_filters.append(f"apad=whole_dur={pad_dur:.2f}")
+            out_dur = pad_dur
+        else:
+            out_dur = raw_clip_dur
+
+        subprocess.run([
+            "ffmpeg", "-y",
+            "-ss", str(start_sec),
+            "-t", f"{raw_clip_dur:.2f}",
+            "-i", raw_wav,
+            "-af", ",".join(af_filters),
+            "-t", f"{out_dur:.2f}",
+            "-ar", "44100", "-ac", "2",
+            final_wav
+        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     # Cleanup raw temp files
     for p in (raw_download, raw_wav, yt_out):
@@ -443,4 +570,6 @@ def prepare_track_audio(artist: str, title: str, cache_dir: Optional[str] = None
         "duration": round(len(samples) / sr, 2),
         "rms_envelope": features["rms"],
         "audio_features": features,
+        "tts_duration": tts_duration,
     }
+

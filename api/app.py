@@ -12,7 +12,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -21,12 +21,18 @@ from pydantic import BaseModel
 from core.db import (
     init_db, count_tracks, get_available_tracks, get_recent_posts,
     get_all_tracks, add_track, add_to_blacklist, remove_from_blacklist,
-    get_blacklist, get_all_settings, set_setting, get_post_by_id,
-    update_post_status, is_track_posted, is_blacklisted,
+    get_blacklist, get_all_settings, set_setting, get_setting, get_post_by_id,
+    update_post_status, update_post_fields, is_track_posted, is_blacklisted,
     queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue
 )
 from core.charts import seed_charts_if_empty
-from core.pipeline import generate_post_video
+from core.pipeline import (
+    generate_post_video, enqueue_tts_post, process_pending_post, TTSJobWorker
+)
+from core.tts import (
+    TTS_CACHE_DIR, list_voice_profiles, save_voice_sample, delete_voice_sample,
+    get_tts_worker_health, synthesize_hook_audio, resolve_voice_region,
+)
 from core.tiktok_poster import (
     check_cookie_health, upload_to_tiktok, build_caption,
     parse_cookies, parse_cookies_json_secure, CookieParseError
@@ -40,8 +46,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEB_DIR = os.path.join(PROJECT_ROOT, "web")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(WEB_DIR, exist_ok=True)
+os.makedirs(TTS_CACHE_DIR, exist_ok=True)
 
 daemon = AutoVJDaemon()
+tts_worker = TTSJobWorker()
 
 # Live generation job state
 gen_state: Dict[str, Any] = {
@@ -71,7 +79,9 @@ async def lifespan(app: FastAPI):
     init_db()
     seed_charts_if_empty()
     daemon.start()
+    tts_worker.start()
     yield
+    tts_worker.stop()
     daemon.stop()
 
 
@@ -94,6 +104,14 @@ class GenerateRequest(BaseModel):
     force_wildcard: Optional[bool] = None
     publish: bool = False
     auto_queue: Optional[bool] = None
+    tts_enabled: Optional[bool] = None
+    voice_region: Optional[str] = None
+    custom_hook_text: Optional[str] = None
+
+
+class TTSTestRequest(BaseModel):
+    region: str = "uk"
+    text: Optional[str] = None
 
 
 class TrackCreateRequest(BaseModel):
@@ -139,6 +157,7 @@ def api_status():
     posts = get_recent_posts(limit=500)
     posted_count = sum(1 for p in posts if p["status"] in ("posted", "draft"))
     queued_count = len(get_queued_posts())
+    tts_pending_count = sum(1 for p in posts if p["status"] in ("tts_pending", "rendering"))
     cookie_health = check_cookie_health()
 
     return {
@@ -151,10 +170,12 @@ def api_status():
             "available_wildcards": avail_wild,
             "total_posts": len(posts),
             "published_count": posted_count,
-            "queued_count": queued_count
+            "queued_count": queued_count,
+            "tts_pending_count": tts_pending_count,
         },
         "generation": gen_state,
-        "publish": publish_state
+        "publish": publish_state,
+        "tts_queue": tts_worker.status(),
     }
 
 
@@ -166,6 +187,35 @@ def api_styles():
 
 @app.post("/api/generate")
 def api_generate(req: GenerateRequest):
+    use_tts = (
+        bool(req.tts_enabled)
+        if req.tts_enabled is not None
+        else get_setting("tts_enabled", "false") == "true"
+    )
+
+    if use_tts:
+        if not resolve_voice_region(requested_region=req.voice_region):
+            raise HTTPException(
+                status_code=400,
+                detail="Voice Hook TTS is enabled, but no UK or US voice clip has been uploaded yet. Upload a sample in Admin first.",
+            )
+        try:
+            pending_post = enqueue_tts_post(
+                track_id=req.track_id,
+                template=req.template,
+                era_appropriate=req.era_appropriate,
+                force_wildcard=req.force_wildcard,
+                publish=req.publish,
+                auto_queue=req.auto_queue,
+                voice_region=req.voice_region,
+                custom_hook_text=req.custom_hook_text,
+            )
+            tts_worker.start()
+            tts_worker.wake()
+            return {"started": True, "queued_tts": True, "post": pending_post}
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     with gen_lock:
         if gen_state["running"]:
             raise HTTPException(status_code=409, detail="A generation job is already running.")
@@ -188,6 +238,7 @@ def api_generate(req: GenerateRequest):
                 force_wildcard=req.force_wildcard,
                 publish=req.publish,
                 auto_queue=req.auto_queue,
+                tts_enabled=False,
                 progress_cb=_cb
             )
             gen_state["last_post"] = post
@@ -200,7 +251,7 @@ def api_generate(req: GenerateRequest):
             gen_state["running"] = False
 
     threading.Thread(target=_worker, daemon=True).start()
-    return {"started": True}
+    return {"started": True, "queued_tts": False}
 
 
 @app.get("/api/generate/status")
@@ -462,9 +513,102 @@ def api_import_cookies_file(req: CookieFileImportRequest):
     }
 
 
+# --- TTS Voice Profiles & Queue Recovery Endpoints ---
+
+@app.get("/api/tts/status")
+def api_tts_status():
+    return {
+        "worker": get_tts_worker_health(),
+        "profiles": list_voice_profiles(),
+        "queue": tts_worker.status(),
+        "tts_enabled": get_setting("tts_enabled", "false") == "true",
+    }
+
+
+@app.get("/api/tts/voices")
+def api_tts_voices():
+    return {"profiles": list_voice_profiles()}
+
+
+@app.post("/api/tts/voices/{region}")
+async def api_upload_voice_sample(region: str, file: UploadFile = File(...)):
+    raw = await file.read()
+    try:
+        clip = save_voice_sample(region, file.filename or "voice.wav", raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "clip": clip, "profiles": list_voice_profiles()}
+
+
+@app.delete("/api/tts/voices/{region}/{filename}")
+def api_delete_voice_sample(region: str, filename: str):
+    try:
+        deleted = delete_voice_sample(region, filename)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Voice clip not found.")
+    return {"ok": True, "profiles": list_voice_profiles()}
+
+
+@app.post("/api/tts/test")
+def api_test_voice(req: TTSTestRequest):
+    region = (req.region or "uk").strip().lower()
+    sample_text = (req.text or "").strip() or (
+        "Oh, I bet this takes you right back to 1985! Turn this one all the way up on Gen X seventy-one!"
+        if region == "uk"
+        else "Where were you in 1985 when you heard this first? Turn it up on Gen X seventy-one!"
+    )
+    os.makedirs(TTS_CACHE_DIR, exist_ok=True)
+    out_name = f"test_{region}_{int(__import__('time').time())}.wav"
+    out_path = os.path.join(TTS_CACHE_DIR, out_name)
+    tts_speed = float(get_setting("tts_speed", "1.05") or "1.05")
+    try:
+        res = synthesize_hook_audio(text=sample_text, region=region, output_path=out_path, speed=tts_speed)
+        return {
+            "ok": True,
+            "region": region,
+            "duration": res["duration"],
+            "elapsed_sec": res["elapsed_sec"],
+            "audio_url": f"/tts-cache/{out_name}",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/posts/{post_id}/retry-tts")
+def api_retry_tts(post_id: int):
+    post = get_post_by_id(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    update_post_fields(post_id, status="tts_pending", error_message=None, tts_enabled=1)
+    tts_worker.start()
+    tts_worker.wake()
+    return {"ok": True, "post": get_post_by_id(post_id)}
+
+
+@app.post("/api/posts/{post_id}/render-no-tts")
+def api_render_without_tts(post_id: int):
+    post = get_post_by_id(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    update_post_fields(post_id, status="rendering", error_message=None, tts_enabled=0)
+
+    def _fallback_worker():
+        try:
+            process_pending_post(post_id, render_without_tts=True)
+        except Exception as exc:
+            logger.exception("Fallback render without TTS failed for post #%s", post_id)
+            update_post_status(post_id, "failed", error_message=str(exc))
+
+    threading.Thread(target=_fallback_worker, daemon=True).start()
+    return {"ok": True, "started": True, "post_id": post_id}
+
+
 # --- Static Files & PWA Routes ---
 
 app.mount("/output", StaticFiles(directory=OUTPUT_DIR), name="output")
+app.mount("/tts-cache", StaticFiles(directory=TTS_CACHE_DIR), name="tts-cache")
 app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
 
 
