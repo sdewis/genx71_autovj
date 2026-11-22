@@ -107,13 +107,15 @@ def test_voice_profiles_upload_delete_and_regional_routing():
 
 
 def test_radio_ramp_mix_backs_up_start_and_targets_near_59s():
+    from core.audio import _load_wav_mono
     with tempfile.TemporaryDirectory() as tmp:
         raw_track = os.path.join(tmp, "full_song.wav")
         tts_wav = os.path.join(tmp, "dj_hook.wav")
         out_wav = os.path.join(tmp, "mixed.wav")
 
         _make_sine_wav(raw_track, duration=120.0, freq=260.0, sr=22050)
-        _make_sine_wav(tts_wav, duration=6.0, freq=520.0, sr=22050)
+        # Silent TTS wav of 6.0s so we can measure the exact music bed envelope
+        _make_sine_wav(tts_wav, duration=6.0, freq=520.0, sr=22050, amp=0.0)
 
         info = mix_radio_ramp_audio(
             raw_track_wav=raw_track,
@@ -123,9 +125,18 @@ def test_radio_ramp_mix_backs_up_start_and_targets_near_59s():
             target_total_duration=58.0,
         )
         assert os.path.exists(out_wav)
-        assert info["pre_roll_start"] == pytest.approx(24.0, abs=0.2)
+        assert info["pre_roll_start"] == pytest.approx(23.85, abs=0.2)
         assert info["tts_duration"] == pytest.approx(6.0, abs=0.2)
+        assert info["ramp_start"] >= 6.1
         assert 57.0 <= info["duration"] <= MAX_CLIP_DURATION
+
+        # Verify music is still ducked at the very end of TTS (5.5s..6.0s) and loud after ramp (7.0s..7.5s)
+        samples, sr = _load_wav_mono(out_wav)
+        rms_mid_tts = float(np.sqrt(np.mean(samples[int(2.0 * sr):int(2.5 * sr)] ** 2)))
+        rms_end_tts = float(np.sqrt(np.mean(samples[int(5.5 * sr):int(6.0 * sr)] ** 2)))
+        rms_post_drop = float(np.sqrt(np.mean(samples[int(7.0 * sr):int(7.5 * sr)] ** 2)))
+        assert rms_end_tts == pytest.approx(rms_mid_tts, rel=0.15)
+        assert rms_post_drop > rms_end_tts * 3.0
 
 
 def test_fact_schedule_offsets_after_hook_duration():
