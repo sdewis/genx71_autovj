@@ -149,3 +149,78 @@ def test_browser_style_pack_mp4_render(style):
         info = json.loads(probe)
         assert info["streams"][0]["width"] == 1080
         assert info["streams"][0]["height"] == 1920
+
+
+def test_delete_post_unlocks_track_and_compacts_queue():
+    from core.db import (
+        add_track, is_track_posted, queue_post, get_queued_posts, delete_post, get_post_by_id
+    )
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    os.close(fd)
+    try:
+        init_db(db_path)
+        t1 = add_track("Delete Test Band", "Song One", 1984, chart_peak=5, db_path=db_path)
+        t2 = add_track("Delete Test Band", "Song Two", 1985, chart_peak=8, db_path=db_path)
+        p1 = record_post(t1, "Delete Test Band", "Song One", 1984, status="rendered", db_path=db_path)
+        p2 = record_post(t2, "Delete Test Band", "Song Two", 1985, status="rendered", db_path=db_path)
+        queue_post(p1, db_path=db_path)
+        queue_post(p2, db_path=db_path)
+
+        assert is_track_posted("Delete Test Band", "Song One", db_path=db_path) is True
+        deleted = delete_post(p1, db_path=db_path)
+        assert deleted is not None and deleted["id"] == p1
+        assert get_post_by_id(p1, db_path=db_path) is None
+        # Track is unlocked for re-rendering
+        assert is_track_posted("Delete Test Band", "Song One", db_path=db_path) is False
+        # Remaining scheduled queue item compacted to position #1
+        queued = get_queued_posts(db_path=db_path)
+        assert len(queued) == 1
+        assert queued[0]["id"] == p2
+        assert queued[0]["queue_position"] == 1
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+def test_api_delete_post_removes_file_and_blocks_rendering():
+    from core.video_renderer import OUTPUT_DIR
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    fake_mp4 = os.path.join(OUTPUT_DIR, "_pytest_delete_render_test.mp4")
+    with open(fake_mp4, "wb") as f:
+        f.write(b"fake-mp4-bytes")
+
+    pid_rendered = record_post(
+        None, "API Delete Band", "Removable Hit", 1986,
+        template_used="neon", video_path=fake_mp4, status="rendered"
+    )
+    pid_rendering = record_post(
+        None, "API Delete Band", "Active Render", 1987,
+        template_used="vhs", status="rendering"
+    )
+
+    try:
+        with TestClient(app) as client:
+            # Active render is protected (409)
+            r_busy = client.delete(f"/api/posts/{pid_rendering}")
+            assert r_busy.status_code == 409
+
+            # Rendered post deletes cleanly and removes its MP4 file
+            r_del = client.delete(f"/api/posts/{pid_rendered}")
+            assert r_del.status_code == 200
+            body = r_del.json()
+            assert body["ok"] is True
+            assert body["file_removed"] is True
+            assert body["track_unlocked"] is True
+            assert not os.path.exists(fake_mp4)
+
+            # Deleting again returns 404
+            r_missing = client.delete(f"/api/posts/{pid_rendered}")
+            assert r_missing.status_code == 404
+    finally:
+        from core.db import delete_post
+        delete_post(pid_rendered)
+        delete_post(pid_rendering)
+        if os.path.exists(fake_mp4):
+            os.remove(fake_mp4)
+

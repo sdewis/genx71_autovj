@@ -465,6 +465,25 @@ def get_post_by_id(post_id: int, db_path: Optional[str] = None) -> Optional[Dict
     return dict(row) if row else None
 
 
+def delete_post(post_id: int, db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    Permanently remove a post/render entry from the posts table, compacting
+    scheduled queue positions if needed. Deleting a post automatically unlocks
+    its track in deduplication checks so it can be re-rendered.
+    Returns the deleted post dict, or None if not found.
+    """
+    conn = get_db(db_path)
+    with conn:
+        row = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if not row:
+            return None
+        deleted = dict(row)
+        conn.execute("DELETE FROM posts WHERE id = ?", (post_id,))
+        if deleted.get("status") == "scheduled":
+            _compact_queue_positions(conn)
+        return deleted
+
+
 _ALLOWED_POST_UPDATE_FIELDS = {
     "template_used", "video_path", "audio_url", "artwork_path", "status",
     "error_message", "hook_text", "hook_template_id", "voice_region",

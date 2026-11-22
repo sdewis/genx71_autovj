@@ -1,14 +1,19 @@
 """
-Modern 9:16 (1080x1920) Multi-Template TikTok Video Renderer for GenX71 AutoVJ.
-Templates:
-  - 'vinyl': Spinning 12" vinyl record with concentric grooves + sleeve cover
-  - 'cd': High-gloss CD jewel case with transparent spine & specular reflection
-  - 'retro': Glassmorphic audiophile card with dynamic progress bar & waveform
-All templates feature:
-  - Ambient color-matched blurred artwork background
-  - Beat-reactive spectrum equalizer bars driven by RMS audio envelope
-  - Official chart peak pill badge & sleek typography within TikTok safe zones
-  - Subtle Seany GenX watermark (genxlogofinal.png) positioned in safe margins
+Modern 9:16 (1080x1920) Style Pack TikTok Video Renderer for GenX71 AutoVJ.
+
+Primary renderer (via core/browser_renderer.py + core/studio_template.html):
+  - 6 deterministic, code-rendered GenX Style Packs (0 AI tokens at runtime):
+    'hifi' (3D Vinyl + Tonearm / Glossy 3D CD Case), 'vhs' (VHS/MTV Broadcast),
+    'neon' (80s Synth Neon Tubes), 'riso' (Risograph Zine Poster),
+    'kinetic' (Kinetic Color-Block), and 'cassette' (Cassette / Boombox Deck)
+  - Legacy aliases ('vinyl', 'cd', 'retro') map cleanly onto 'hifi' variants
+  - Real 24-band FFT spectrum + bass/kick onset beat reactivity
+  - Transparent glowing Seany GenX neon station bug (assets/genx_neon_logo.png)
+  - 3 fading track trivia cards + live ON AIR DJ hook captions when TTS is active
+
+Fallback renderer (this module):
+  - Lightweight Python/Pillow + FFmpeg renderer kept as an automatic safety
+    fallback if headless Chromium is unavailable.
 """
 
 import os

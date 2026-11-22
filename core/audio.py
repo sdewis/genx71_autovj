@@ -1,10 +1,9 @@
 """
-Intelligent Audio Sourcing and Boundary Clipper for GenX71 AutoVJ.
-1. Fetches official 30s studio previews from Deezer & iTunes (with strict artist/title matching).
-2. Falls back to yt-dlp YouTube audio extraction for rarer Top 21-40 wildcards.
-3. Analyzes amplitude/onset envelopes with NumPy/SciPy to snap clip boundaries to
-   verse/chorus phrasing and avoid abrupt mid-lyric cuts.
-4. Outputs normalized 30s audio + per-frame RMS energy envelope for reactive visualizers.
+Intelligent Audio Sourcing, Boundary Clipper, FFT Feature Extractor & Radio-Ramp Mixer for GenX71 AutoVJ.
+1. Prioritizes full-track sourcing via yt-dlp (falling back to Deezer/iTunes 30s previews, padded to >=30s).
+2. Analyzes RMS energy troughs with NumPy/SciPy to clip a clean 35-45s chorus/hook (strictly <60s TikTok limit).
+3. Extracts per-frame RMS, 24-band log-spaced FFT spectrum, sub-bass, and kick/beat onset impulses.
+4. Supports "talk up the post" radio-ramp audio mixing with Regional UK/US TTS DJ voice hooks (~58s target).
 """
 
 import os
