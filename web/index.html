@@ -9,7 +9,7 @@
   <title>GenX71 AutoVJ Studio</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/logo.png" type="image/png" />
-  <link rel="stylesheet" href="/static/style.css?v=2.9" />
+  <link rel="stylesheet" href="/static/style.css?v=2.10" />
 </head>
 <body>
   <header class="topbar">
@@ -164,7 +164,9 @@
     <section id="tab-tracks" class="tab-panel">
       <div class="section-header">
         <h2>GenX Chart Catalog (1978–1996)</h2>
+        <button id="btn-load-new-tracks" class="btn btn-small btn-accent">✨ Load New Items</button>
       </div>
+      <div id="tracks-load-status" class="tracks-load-status hidden"></div>
       <div class="search-bar">
         <input type="search" id="track-search" placeholder="Search artist, title, or year..." />
       </div>
@@ -183,7 +185,9 @@
           <button type="submit" class="btn btn-primary">Add to Pool</button>
         </form>
       </details>
+      <div id="tracks-pagination-top" class="pagination-bar hidden"></div>
       <div id="tracks-list" class="list-stack"></div>
+      <div id="tracks-pagination-bottom" class="pagination-bar hidden"></div>
     </section>
 
     <!-- TAB 4: ADMIN & SCHEDULE -->
@@ -346,6 +350,6 @@
     </button>
   </nav>
 
-  <script src="/static/app.js?v=2.11"></script>
+  <script src="/static/app.js?v=2.12"></script>
 </body>
 </html>

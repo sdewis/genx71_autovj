@@ -3,7 +3,7 @@
 Automated 1978–1996 GenX Chart Hit TikTok Video Studio, 24/7 Background Scheduler, and Samsung Galaxy S24 Ultra PWA.
 
 ## Features
-- **GenX Era Chart Engine (`core/charts.py`)**: Curated 1978–1996 UK Official Singles & US Billboard catalog with configurable **Wildcard (Top 21–40)** rarity weighting (default 25%) and permanent SQLite deduplication (`core/db.py`).
+- **GenX Era Chart Engine (`core/charts.py`)**: Curated 1978–1996 UK Official Singles & US Billboard catalog with **✨ Load New Items** hybrid batch loading (fetches live 1978–1996 UK/US chart singles from Wikipedia with an expanded curated offline fallback pool, pushing previous pages back from Page 1 → Page 2 → Page 3…), configurable **Wildcard (Top 21–40)** rarity weighting (default 25%), and permanent SQLite deduplication (`core/db.py`).
 - **Intelligent Audio Clipper & FFT Analyzer (`core/audio.py`)**: Prioritizes full tracks via `yt-dlp` (with Deezer/iTunes preview fallback), boundary-clips clean 35–45s hooks (`>=30s`, `<60s` TikTok limit), and extracts 24-band log-spaced FFT spectrum + bass/kick beat onset impulses.
 - **High-Res Single Artwork (`core/artwork.py`)**: Fetches authentic Vinyl/CD single sleeves and extracts dominant/accent color palettes to drive each style's lighting, gradients, and color blocks.
 - **9:16 Chromium Style Pack Renderer (`core/browser_renderer.py`, `core/studio_template.html`, `core/styles.py`)**: Deterministic, zero-AI-token 1080×1920 MP4 renderer with **Era-Weighted Auto-Rotate** (never repeating the last 2 styles) and automatic Pillow fallback (`core/video_renderer.py`):
@@ -17,7 +17,7 @@ Automated 1978–1996 GenX Chart Hit TikTok Video Studio, 24/7 Background Schedu
 - **Regional Voice Hook TTS (`core/tts.py`, `core/hooks.py`, `tts_worker/`)**: CPU-only zero-shot voice cloning sidecar (Coqui XTTS-v2) supporting **UK** & **US** voice profiles (auto-routed by track chart region, with optional per-upload background noise cleanup), 30+ era-specific upbeat GenX DJ hook templates, **"talk up the post"** radio-ramp audio mixing (targeting ~58s total), live `ON AIR` captions, and async `TTS pending` queue statuses in the Web GUI.
 - **Stealth TikTok Poster (`core/tiktok_poster.py`)**: Playwright + `playwright-stealth` using your browser `sessionid` cookies, human-like typing/delays, and Drafts or Direct Publish support.
 - **24/7 Daemon with Jitter (`daemon.py`)**: `APScheduler` service with randomized Gaussian time fluctuation (`+/-` configurable minutes) to avoid bot-like posting intervals.
-- **Samsung S24 Ultra PWA & Linux UI (`web/`, `api/app.py`)**: Mobile-first AMOLED dark interface with Studio preview, drag-and-drop Scheduled Queue, History management (including **Delete Render** to remove an MP4 and unlock a track for re-rendering), Charts catalog, and Admin settings.
+- **Samsung S24 Ultra PWA & Linux UI (`web/`, `api/app.py`)**: Mobile-first AMOLED dark interface with Studio preview, drag-and-drop Scheduled Queue, History management (including **Delete Render** to remove an MP4 and unlock a track for re-rendering), paginated Charts catalog with **✨ Load New Items**, and Admin settings.
 
 ## Quick Start
 

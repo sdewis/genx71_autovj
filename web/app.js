@@ -695,33 +695,94 @@ window.previewFromList = (url, artist, title, badge, id) => {
 document.getElementById("btn-refresh-posts").addEventListener("click", loadPosts);
 
 // --- Tracks Catalog ---
-async function loadTracks(query = "") {
-  const res = await fetch(`/api/tracks?q=${encodeURIComponent(query)}`);
+let currentTracksPage = 1;
+
+function renderTracksPagination(page, totalPages, pageItemCount, searchActive) {
+  const containers = [
+    document.getElementById("tracks-pagination-top"),
+    document.getElementById("tracks-pagination-bottom"),
+  ];
+
+  containers.forEach((bar) => {
+    if (!bar) return;
+    if (searchActive || totalPages <= 1) {
+      bar.classList.add("hidden");
+      bar.innerHTML = "";
+      return;
+    }
+
+    bar.classList.remove("hidden");
+    const pageButtons = [];
+    for (let p = 1; p <= totalPages; p++) {
+      // Compact window when many pages exist
+      if (totalPages > 7 && p !== 1 && p !== totalPages && Math.abs(p - page) > 1) {
+        if (p === 2 || p === totalPages - 1) {
+          pageButtons.push('<span class="pagination-ellipsis">…</span>');
+        }
+        continue;
+      }
+      const activeCls = p === page ? "active" : "";
+      pageButtons.push(
+        `<button class="btn-small pagination-num ${activeCls}" onclick="goToTracksPage(${p})">${p}</button>`
+      );
+    }
+
+    bar.innerHTML = `
+      <button class="btn-small" onclick="goToTracksPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>← Prev</button>
+      <div class="pagination-pages">
+        ${pageButtons.join("")}
+        <span class="pagination-meta">Page ${page} of ${totalPages} • ${pageItemCount} tracks</span>
+      </div>
+      <button class="btn-small" onclick="goToTracksPage(${page + 1})" ${page >= totalPages ? "disabled" : ""}>Next →</button>
+    `;
+  });
+}
+
+window.goToTracksPage = (page) => {
+  const q = document.getElementById("track-search").value;
+  loadTracks(q, page);
+};
+
+async function loadTracks(query = "", page = currentTracksPage) {
+  const res = await fetch(`/api/tracks?q=${encodeURIComponent(query)}&page=${encodeURIComponent(page)}`);
   const data = await res.json();
+  currentTracksPage = data.page || 1;
+
   const list = document.getElementById("tracks-list");
   list.innerHTML = "";
 
-  data.tracks.forEach((t) => {
-    const el = document.createElement("div");
-    el.className = "item-card";
-    const badges = [];
-    if (t.is_wildcard) badges.push('<span class="badge badge-wildcard">WILDCARD</span>');
-    if (t.posted) badges.push('<span class="badge badge-posted">POSTED</span>');
-    if (t.blacklisted) badges.push('<span class="badge badge-failed">BLOCKED</span>');
+  if (!data.tracks || data.tracks.length === 0) {
+    list.innerHTML = '<p class="muted" style="text-align:center; padding:18px;">No tracks match your filter.</p>';
+  } else {
+    data.tracks.forEach((t) => {
+      const el = document.createElement("div");
+      el.className = "item-card";
+      const badges = [];
+      if (t.is_wildcard) badges.push('<span class="badge badge-wildcard">WILDCARD</span>');
+      if (t.posted) badges.push('<span class="badge badge-posted">POSTED</span>');
+      if (t.blacklisted) badges.push('<span class="badge badge-failed">BLOCKED</span>');
 
-    el.innerHTML = `
-      <div class="item-info">
-        <div class="item-title">${t.artist} — ${t.title}</div>
-        <div class="item-sub">${t.year} • ${t.chart_region} #${t.chart_peak || "?"} • ${t.genre}</div>
-        <div style="margin-top:4px; display:flex; gap:6px;">${badges.join("")}</div>
-      </div>
-      <div class="item-actions">
-        <button class="btn-small" onclick="renderSpecificTrack(${t.id})">🎬 Render</button>
-        <button class="btn-small" onclick="blacklistTrack('${t.artist.replace(/'/g, "\\'")}', '${t.title.replace(/'/g, "\\'")}')">🚫</button>
-      </div>
-    `;
-    list.appendChild(el);
-  });
+      el.innerHTML = `
+        <div class="item-info">
+          <div class="item-title">${t.artist} — ${t.title}</div>
+          <div class="item-sub">${t.year} • ${t.chart_region} #${t.chart_peak || "?"} • ${t.genre}</div>
+          <div style="margin-top:4px; display:flex; gap:6px;">${badges.join("")}</div>
+        </div>
+        <div class="item-actions">
+          <button class="btn-small" onclick="renderSpecificTrack(${t.id})">🎬 Render</button>
+          <button class="btn-small" onclick="blacklistTrack('${t.artist.replace(/'/g, "\\'")}', '${t.title.replace(/'/g, "\\'")}')">🚫</button>
+        </div>
+      `;
+      list.appendChild(el);
+    });
+  }
+
+  renderTracksPagination(
+    data.page || 1,
+    data.total_pages || 1,
+    (data.tracks || []).length,
+    Boolean(data.search_active)
+  );
 }
 
 window.renderSpecificTrack = (trackId) => {
@@ -736,12 +797,12 @@ window.blacklistTrack = async (artist, title) => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ artist, title, reason: "Admin UI" })
   });
-  loadTracks(document.getElementById("track-search").value);
+  loadTracks(document.getElementById("track-search").value, currentTracksPage);
   refreshStatus();
 };
 
 document.getElementById("track-search").addEventListener("input", (e) => {
-  loadTracks(e.target.value);
+  loadTracks(e.target.value, 1);
 });
 
 document.getElementById("add-track-form").addEventListener("submit", async (e) => {
@@ -759,9 +820,56 @@ document.getElementById("add-track-form").addEventListener("submit", async (e) =
     body: JSON.stringify(payload)
   });
   e.target.reset();
-  loadTracks();
+  loadTracks("", 1);
   refreshStatus();
 });
+
+const btnLoadNewTracks = document.getElementById("btn-load-new-tracks");
+if (btnLoadNewTracks) {
+  btnLoadNewTracks.addEventListener("click", async () => {
+    const statusBox = document.getElementById("tracks-load-status");
+    const origText = btnLoadNewTracks.textContent;
+    btnLoadNewTracks.disabled = true;
+    btnLoadNewTracks.textContent = "⏳ Loading...";
+    if (statusBox) {
+      statusBox.classList.remove("hidden", "error");
+      statusBox.textContent = "Fetching 25 new 1978–1996 chart tracks...";
+    }
+    try {
+      const res = await fetch("/api/tracks/load-new?count=25", { method: "POST" });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      document.getElementById("track-search").value = "";
+      await loadTracks("", 1);
+      refreshStatus();
+
+      if (statusBox) {
+        if (data.added > 0) {
+          const srcLabel =
+            data.source === "wikipedia"
+              ? "Wikipedia"
+              : data.source === "hybrid"
+                ? "Wikipedia + Curated Pool"
+                : "Curated Pool";
+          statusBox.textContent = `Loaded ${data.added} new tracks into Page 1 (${srcLabel}). Previous list moved to Page 2 (${data.total_pages} pages total).`;
+        } else {
+          statusBox.textContent = data.message || "No new unique tracks available right now.";
+        }
+      }
+    } catch (err) {
+      if (statusBox) {
+        statusBox.classList.add("error");
+        statusBox.textContent = `Could not load new items: ${err.message || err}`;
+      }
+    } finally {
+      btnLoadNewTracks.disabled = false;
+      btnLoadNewTracks.textContent = origText;
+    }
+  });
+}
 
 // --- Admin Settings & Cookies ---
 async function loadSettings() {

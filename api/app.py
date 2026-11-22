@@ -25,9 +25,9 @@ from core.db import (
     get_blacklist, get_all_settings, set_setting, get_setting, get_post_by_id,
     update_post_status, update_post_fields, is_track_posted, is_blacklisted,
     queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue,
-    delete_post
+    delete_post, get_track_batches, get_tracks_by_batch
 )
-from core.charts import seed_charts_if_empty
+from core.charts import seed_charts_if_empty, load_new_chart_batch
 from core.pipeline import (
     generate_post_video, enqueue_tts_post, process_pending_post, TTSJobWorker
 )
@@ -447,19 +447,58 @@ def api_clear_queue():
 
 
 @app.get("/api/tracks")
-def api_tracks(q: str = "", limit: int = 200):
-    tracks = get_all_tracks(limit=500)
+def api_tracks(q: str = "", page: int = 1, limit: int = 200):
     q_lower = q.strip().lower()
+    if q_lower:
+        tracks = get_all_tracks(limit=2000)
+        results = []
+        for t in tracks:
+            if (
+                q_lower not in t["artist"].lower()
+                and q_lower not in t["title"].lower()
+                and q_lower not in str(t["year"])
+            ):
+                continue
+            t["posted"] = is_track_posted(t["artist"], t["title"])
+            t["blacklisted"] = is_blacklisted(t["artist"], t["title"])
+            results.append(t)
+            if len(results) >= limit:
+                break
+        return {
+            "tracks": results,
+            "page": 1,
+            "total_pages": 1,
+            "total_tracks": len(results),
+            "batch_num": None,
+            "search_active": True,
+        }
+
+    batches = get_track_batches()
+    total_pages = max(1, len(batches))
+    safe_page = max(1, min(int(page), total_pages))
+    target_batch = batches[safe_page - 1] if batches else 1
+    tracks = get_tracks_by_batch(target_batch) if batches else []
+
     results = []
     for t in tracks:
-        if q_lower and q_lower not in t["artist"].lower() and q_lower not in t["title"].lower() and q_lower not in str(t["year"]):
-            continue
         t["posted"] = is_track_posted(t["artist"], t["title"])
         t["blacklisted"] = is_blacklisted(t["artist"], t["title"])
         results.append(t)
-        if len(results) >= limit:
-            break
-    return {"tracks": results}
+
+    return {
+        "tracks": results,
+        "page": safe_page,
+        "total_pages": total_pages,
+        "total_tracks": count_tracks(),
+        "batch_num": target_batch,
+        "search_active": False,
+    }
+
+
+@app.post("/api/tracks/load-new")
+def api_load_new_tracks(count: int = Query(default=25, ge=1, le=50)):
+    result = load_new_chart_batch(count=count)
+    return result
 
 
 @app.post("/api/tracks")

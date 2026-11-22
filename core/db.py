@@ -35,6 +35,7 @@ def init_db(db_path: Optional[str] = None) -> None:
             is_wildcard INTEGER DEFAULT 0,
             genre TEXT DEFAULT 'Pop/Rock',
             facts_json TEXT,
+            batch_num INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(artist, title)
         );
@@ -77,10 +78,13 @@ def init_db(db_path: Optional[str] = None) -> None:
         CREATE INDEX IF NOT EXISTS idx_posts_artist_title ON posts(artist, title);
         """)
 
-        # Safe migration for existing databases missing facts_json
+        # Safe migrations for existing databases on tracks
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)").fetchall()}
         if "facts_json" not in cols:
             conn.execute("ALTER TABLE tracks ADD COLUMN facts_json TEXT")
+        if "batch_num" not in cols:
+            conn.execute("ALTER TABLE tracks ADD COLUMN batch_num INTEGER NOT NULL DEFAULT 1")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_tracks_batch ON tracks(batch_num)")
 
         # Safe migrations for existing databases on posts
         post_cols = {row["name"] for row in conn.execute("PRAGMA table_info(posts)").fetchall()}
@@ -121,16 +125,49 @@ def init_db(db_path: Optional[str] = None) -> None:
 
 # --- Track Management ---
 
+def get_max_track_batch(db_path: Optional[str] = None) -> int:
+    conn = get_db(db_path)
+    row = conn.execute("SELECT MAX(batch_num) AS max_batch FROM tracks").fetchone()
+    return int(row["max_batch"]) if row and row["max_batch"] is not None else 0
+
+
+def get_track_batches(db_path: Optional[str] = None) -> List[int]:
+    """Return distinct batch numbers in descending order (newest batch = Page 1)."""
+    conn = get_db(db_path)
+    rows = conn.execute("SELECT DISTINCT batch_num FROM tracks ORDER BY batch_num DESC").fetchall()
+    return [int(r["batch_num"]) for r in rows]
+
+
+def get_tracks_by_batch(batch_num: int, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
+    conn = get_db(db_path)
+    cur = conn.execute(
+        "SELECT * FROM tracks WHERE batch_num = ? ORDER BY year ASC, chart_peak ASC, id ASC",
+        (int(batch_num),),
+    )
+    return [dict(r) for r in cur.fetchall()]
+
+
+def get_existing_track_keys(db_path: Optional[str] = None) -> set:
+    """Return a set of lowercase (artist, title) tuples already in the tracks table."""
+    conn = get_db(db_path)
+    rows = conn.execute("SELECT LOWER(artist) AS a, LOWER(title) AS t FROM tracks").fetchall()
+    return {(r["a"], r["t"]) for r in rows}
+
+
 def add_track(artist: str, title: str, year: int, chart_peak: Optional[int] = None,
               chart_region: str = "UK", is_wildcard: int = 0, genre: str = "Pop/Rock",
-              facts_json: Optional[str] = None, db_path: Optional[str] = None) -> Optional[int]:
+              facts_json: Optional[str] = None, batch_num: Optional[int] = None,
+              db_path: Optional[str] = None) -> Optional[int]:
     conn = get_db(db_path)
+    if batch_num is None:
+        row = conn.execute("SELECT MAX(batch_num) AS max_batch FROM tracks").fetchone()
+        batch_num = int(row["max_batch"]) if row and row["max_batch"] is not None else 1
     with conn:
         try:
             cur = conn.execute("""
-                INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre, facts_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (artist.strip(), title.strip(), year, chart_peak, chart_region, is_wildcard, genre, facts_json))
+                INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre, facts_json, batch_num)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (artist.strip(), title.strip(), year, chart_peak, chart_region, is_wildcard, genre, facts_json, int(batch_num)))
             return cur.lastrowid
         except sqlite3.IntegrityError:
             # Already exists
@@ -139,15 +176,17 @@ def add_track(artist: str, title: str, year: int, chart_peak: Optional[int] = No
             return row["id"] if row else None
 
 
-def add_tracks_batch(tracks_list: List[Dict[str, Any]], db_path: Optional[str] = None) -> int:
+def add_tracks_batch(tracks_list: List[Dict[str, Any]], batch_num: Optional[int] = None,
+                     db_path: Optional[str] = None) -> int:
     conn = get_db(db_path)
     inserted = 0
+    default_batch = int(batch_num) if batch_num is not None else 1
     with conn:
         for t in tracks_list:
             try:
                 conn.execute("""
-                    INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre, facts_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO tracks (artist, title, year, chart_peak, chart_region, is_wildcard, genre, facts_json, batch_num)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     t["artist"].strip(),
                     t["title"].strip(),
@@ -156,7 +195,8 @@ def add_tracks_batch(tracks_list: List[Dict[str, Any]], db_path: Optional[str] =
                     t.get("chart_region", "UK"),
                     int(t.get("is_wildcard", 0)),
                     t.get("genre", "Pop/Rock"),
-                    t.get("facts_json")
+                    t.get("facts_json"),
+                    int(t.get("batch_num", default_batch)),
                 ))
                 inserted += 1
             except sqlite3.IntegrityError:
@@ -173,7 +213,10 @@ def update_track_facts(track_id: int, facts_json: str, db_path: Optional[str] = 
 
 def get_all_tracks(limit: int = 500, offset: int = 0, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = get_db(db_path)
-    cur = conn.execute("SELECT * FROM tracks ORDER BY year ASC, chart_peak ASC LIMIT ? OFFSET ?", (limit, offset))
+    cur = conn.execute(
+        "SELECT * FROM tracks ORDER BY batch_num DESC, year ASC, chart_peak ASC LIMIT ? OFFSET ?",
+        (limit, offset),
+    )
     return [dict(r) for r in cur.fetchall()]
 
 
