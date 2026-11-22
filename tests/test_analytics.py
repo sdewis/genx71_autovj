@@ -281,3 +281,60 @@ def test_analytics_api_endpoints(tmp_path, monkeypatch):
     assert r_apply.status_code == 200
     assert r_apply.json()["ok"] is True
 
+
+def test_extract_tiktok_videos_from_json_and_matching(tmp_path):
+    from core.analytics import _extract_tiktok_videos_from_json, _match_post_row
+
+    payload = {
+        "status_code": 0,
+        "item_list": [
+            {
+                "id": "7412345678901234567",
+                "desc": "The Human League - Dont You Want Me (1981) | UK #1 #GenX",
+                "stats": {
+                    "playCount": 18400,
+                    "diggCount": 2150,
+                    "commentCount": 112,
+                    "shareCount": 310,
+                    "collectCount": 420,
+                },
+                "metrics": {
+                    "avgWatchTime": 24.5,
+                    "completionRate": 0.62,
+                },
+            },
+            {
+                "item_id": "7498765432109876543",
+                "title": "New Order - Blue Monday (1983)",
+                "view_count": "12.5K",
+                "like_count": "1.1K",
+                "comment_count": 45,
+                "share_count": 90,
+            },
+        ],
+    }
+
+    videos = _extract_tiktok_videos_from_json(payload)
+    assert len(videos) == 2
+
+    by_id = {v["tiktok_id"]: v for v in videos}
+    v1 = by_id["7412345678901234567"]
+    assert v1["views"] == 18400
+    assert v1["likes"] == 2150
+    assert v1["saves"] == 420
+    assert v1["avg_watch_time_sec"] == 24.5
+    assert v1["completion_rate"] == 62.0
+
+    v2 = by_id["7498765432109876543"]
+    assert v2["views"] == 12500
+    assert v2["likes"] == 1100
+
+    # Verify apostrophe-tolerant caption matching
+    local_posts = [
+        {"post_id": 10, "artist": "The Human League", "title": "Don't You Want Me", "tiktok_id": None},
+        {"post_id": 11, "artist": "New Order", "title": "Blue Monday", "tiktok_id": None},
+    ]
+    assert _match_post_row(local_posts, caption=v1["caption"], tiktok_id=v1["tiktok_id"])["post_id"] == 10
+    assert _match_post_row(local_posts, caption=v2["caption"], tiktok_id=v2["tiktok_id"])["post_id"] == 11
+
+

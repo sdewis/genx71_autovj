@@ -28,7 +28,8 @@ logger = logging.getLogger("genx71.analytics")
 
 
 def _normalize_match_text(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+    cleaned = (text or "").lower().replace("'", "").replace("\u2019", "")
+    return re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
 
 
 def _parse_human_number(raw: Any) -> int:
@@ -277,14 +278,135 @@ def import_analytics_file(
     }
 
 
+def _first_present(d: Dict[str, Any], keys: tuple) -> Any:
+    for k in keys:
+        if k in d and d[k] is not None and d[k] != "":
+            return d[k]
+    return None
+
+
+def _extract_tiktok_videos_from_json(payload: Any) -> List[Dict[str, Any]]:
+    """
+    Recursively scan a TikTok Studio / Creator / Web API JSON payload and extract
+    normalized video metric dicts (caption, tiktok_id, views, likes, comments,
+    shares, saves, avg_watch_time_sec, completion_rate, tiktok_url).
+    """
+    found: List[Dict[str, Any]] = []
+    seen_obj_ids = set()
+
+    _ID_KEYS = ("id", "item_id", "itemId", "aweme_id", "awemeId", "video_id", "videoId")
+    _TEXT_KEYS = ("desc", "title", "caption", "description", "video_title", "item_title", "name")
+    _STAT_CONTAINERS = ("stats", "statsV2", "statistics", "metrics", "metric", "item_metrics")
+    _VIEW_KEYS = ("playCount", "play_count", "views", "view_count", "video_views", "vv", "play")
+    _LIKE_KEYS = ("diggCount", "digg_count", "likeCount", "like_count", "likes")
+    _COMMENT_KEYS = ("commentCount", "comment_count", "comments")
+    _SHARE_KEYS = ("shareCount", "share_count", "shares")
+    _SAVE_KEYS = ("collectCount", "collect_count", "favoriteCount", "favorite_count", "saves", "bookmarks")
+    _WATCH_KEYS = ("avgWatchTime", "avg_watch_time", "average_watch_time", "avg_play_time", "avgTimeWatched")
+    _COMP_KEYS = ("completionRate", "completion_rate", "full_video_watched_rate", "watched_full_video_rate")
+
+    def _walk(node: Any, depth: int = 0) -> None:
+        if depth > 10 or node is None:
+            return
+        if isinstance(node, list):
+            for elem in node:
+                _walk(elem, depth + 1)
+            return
+        if not isinstance(node, dict):
+            return
+        oid = id(node)
+        if oid in seen_obj_ids:
+            return
+        seen_obj_ids.add(oid)
+
+        # Check if this dict looks like a TikTok video/post record
+        raw_text = _first_present(node, _TEXT_KEYS)
+        raw_id = _first_present(node, _ID_KEYS)
+
+        stat_src: Dict[str, Any] = {}
+        for sk in _STAT_CONTAINERS:
+            sub = node.get(sk)
+            if isinstance(sub, dict):
+                stat_src.update(sub)
+        # Merge top-level metric fields if present directly on the video dict
+        combined_stats = {**node, **stat_src}
+
+        raw_views = _first_present(combined_stats, _VIEW_KEYS)
+        raw_likes = _first_present(combined_stats, _LIKE_KEYS)
+        raw_comments = _first_present(combined_stats, _COMMENT_KEYS)
+        raw_shares = _first_present(combined_stats, _SHARE_KEYS)
+        raw_saves = _first_present(combined_stats, _SAVE_KEYS)
+        raw_watch = _first_present(combined_stats, _WATCH_KEYS)
+        raw_comp = _first_present(combined_stats, _COMP_KEYS)
+
+        has_any_metric = any(v is not None for v in (raw_views, raw_likes, raw_comments, raw_shares))
+        caption = str(raw_text).strip() if isinstance(raw_text, str) else ""
+        tid = str(raw_id).strip() if raw_id is not None and re.fullmatch(r"\d{8,25}", str(raw_id).strip()) else ""
+
+        if has_any_metric and (caption or tid):
+            comp = _parse_float(raw_comp)
+            if 0.0 < comp <= 1.0:
+                comp = round(comp * 100.0, 2)
+            share_url = _first_present(node, ("share_url", "shareUrl", "video_url", "url", "link"))
+            tiktok_url = str(share_url).strip() if isinstance(share_url, str) and "tiktok.com" in share_url else ""
+            if not tiktok_url and tid:
+                tiktok_url = f"https://www.tiktok.com/@_/video/{tid}"
+            found.append({
+                "tiktok_id": tid,
+                "caption": caption,
+                "views": _parse_human_number(raw_views),
+                "likes": _parse_human_number(raw_likes),
+                "comments": _parse_human_number(raw_comments),
+                "shares": _parse_human_number(raw_shares),
+                "saves": _parse_human_number(raw_saves),
+                "avg_watch_time_sec": _parse_float(raw_watch),
+                "completion_rate": comp,
+                "tiktok_url": tiktok_url,
+            })
+
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                _walk(v, depth + 1)
+
+    _walk(payload)
+
+    # Deduplicate by tiktok_id (or normalized caption), keeping the richest entry
+    merged: Dict[str, Dict[str, Any]] = {}
+    for item in found:
+        key = item["tiktok_id"] or _normalize_match_text(item["caption"])
+        if not key:
+            continue
+        prev = merged.get(key)
+        if not prev:
+            merged[key] = item
+        else:
+            merged[key] = {
+                "tiktok_id": prev["tiktok_id"] or item["tiktok_id"],
+                "caption": prev["caption"] if len(prev["caption"]) >= len(item["caption"]) else item["caption"],
+                "views": max(prev["views"], item["views"]),
+                "likes": max(prev["likes"], item["likes"]),
+                "comments": max(prev["comments"], item["comments"]),
+                "shares": max(prev["shares"], item["shares"]),
+                "saves": max(prev["saves"], item["saves"]),
+                "avg_watch_time_sec": max(prev["avg_watch_time_sec"], item["avg_watch_time_sec"]),
+                "completion_rate": max(prev["completion_rate"], item["completion_rate"]),
+                "tiktok_url": prev["tiktok_url"] or item["tiktok_url"],
+            }
+    return list(merged.values())
+
+
 def sync_tiktok_analytics(
     db_path: Optional[str] = None,
     progress_cb: Optional[Callable[[str, int], None]] = None,
 ) -> Dict[str, Any]:
     """
-    Scrape existing posted video metrics from TikTok Studio Content page using
-    stealth Playwright and stored session cookies, matching captions to local posts.
+    Sync existing posted video metrics from TikTok Studio using stealth Playwright
+    and stored session cookies via 3 layered strategies:
+      1. Intercept internal TikTok Studio JSON API responses (exact structured metrics)
+      2. Parse embedded hydration JSON (__UNIVERSAL_DATA_FOR_REHYDRATION__ / SIGI_STATE)
+      3. Broad DOM extraction fallback (video links, table rows, virtualized cards)
     """
+    import os
     from playwright.sync_api import sync_playwright
     from core.tiktok_poster import check_cookie_health, parse_cookies, _apply_stealth, _dismiss_modals
 
@@ -309,7 +431,120 @@ def sync_tiktok_analytics(
         return {"ok": True, "synced": 0, "scanned": 0, "message": "No local posts found to match."}
 
     _prog("Launching stealth browser for TikTok Studio analytics...", 15)
-    scraped_items: List[Dict[str, Any]] = []
+    api_videos: Dict[str, Dict[str, Any]] = {}
+    dom_items: List[Dict[str, Any]] = []
+    intercepted_urls: List[str] = []
+    landed_url = ""
+    captcha_detected = False
+
+    def _merge_api_videos(items: List[Dict[str, Any]]) -> None:
+        for item in items:
+            key = item["tiktok_id"] or _normalize_match_text(item["caption"])
+            if not key:
+                continue
+            prev = api_videos.get(key)
+            if not prev:
+                api_videos[key] = item
+            else:
+                api_videos[key] = {
+                    "tiktok_id": prev["tiktok_id"] or item["tiktok_id"],
+                    "caption": prev["caption"] if len(prev["caption"]) >= len(item["caption"]) else item["caption"],
+                    "views": max(prev["views"], item["views"]),
+                    "likes": max(prev["likes"], item["likes"]),
+                    "comments": max(prev["comments"], item["comments"]),
+                    "shares": max(prev["shares"], item["shares"]),
+                    "saves": max(prev["saves"], item["saves"]),
+                    "avg_watch_time_sec": max(prev["avg_watch_time_sec"], item["avg_watch_time_sec"]),
+                    "completion_rate": max(prev["completion_rate"], item["completion_rate"]),
+                    "tiktok_url": prev["tiktok_url"] or item["tiktok_url"],
+                }
+
+    def _on_response(response: Any) -> None:
+        try:
+            if response.status != 200:
+                return
+            url = response.url or ""
+            if "tiktok.com" not in url:
+                return
+            ctype = (response.headers or {}).get("content-type", "").lower()
+            if "json" not in ctype:
+                return
+            body = response.json()
+            extracted = _extract_tiktok_videos_from_json(body)
+            if extracted:
+                intercepted_urls.append(url.split("?")[0])
+                _merge_api_videos(extracted)
+        except Exception:
+            pass
+
+    def _scan_page_hydration_and_dom(page: Any) -> None:
+        # Strategy 2: embedded hydration JSON
+        try:
+            hydration_blobs = page.evaluate("""
+                () => {
+                    const out = [];
+                    ['__UNIVERSAL_DATA_FOR_REHYDRATION__', 'SIGI_STATE'].forEach((id) => {
+                        const el = document.getElementById(id);
+                        if (el && el.textContent) out.push(el.textContent);
+                    });
+                    return out;
+                }
+            """) or []
+            for blob in hydration_blobs:
+                try:
+                    _merge_api_videos(_extract_tiktok_videos_from_json(json.loads(blob)))
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # Strategy 3: broad DOM extraction (video links + table/list/card rows)
+        try:
+            rows = page.evaluate("""
+                () => {
+                    const results = [];
+                    const seen = new Set();
+                    const addNode = (el, hrefHint) => {
+                        if (!el) return;
+                        const text = (el.innerText || '').trim();
+                        if (!text || text.length < 6 || text.length > 2000) return;
+                        const linkEl = el.querySelector ? el.querySelector('a[href*="/video/"]') : null;
+                        const href = (linkEl && linkEl.href) || hrefHint || '';
+                        const sig = href || text.slice(0, 120);
+                        if (seen.has(sig)) return;
+                        seen.add(sig);
+                        results.push({ text, href });
+                    };
+
+                    // 1. Anchors pointing to /video/<id> -> walk up to row/card container
+                    document.querySelectorAll('a[href*="/video/"]').forEach((a) => {
+                        let cur = a;
+                        for (let i = 0; i < 4 && cur.parentElement; i++) {
+                            cur = cur.parentElement;
+                            const t = (cur.innerText || '').trim();
+                            if (t.length >= 25 && t.length <= 1200) {
+                                addNode(cur, a.href);
+                                break;
+                            }
+                        }
+                        addNode(a, a.href);
+                    });
+
+                    // 2. Generic table / list / virtualized post rows
+                    const sel = [
+                        'tr', '[role="row"]', '[data-tt*="Post"]',
+                        '[class*="video-item" i]', '[class*="VideoRow" i]',
+                        '[class*="post-row" i]', '[class*="PostRow" i]',
+                        '[class*="table-row" i]', '[class*="TableRow" i]',
+                        '[data-e2e*="video" i]'
+                    ].join(', ');
+                    document.querySelectorAll(sel).forEach((el) => addNode(el, ''));
+                    return results;
+                }
+            """) or []
+            dom_items.extend(rows)
+        except Exception:
+            pass
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -327,60 +562,103 @@ def sync_tiktok_analytics(
         context.add_cookies(cookies)
         page = context.new_page()
         _apply_stealth(page)
+        page.on("response", _on_response)
 
         try:
-            _prog("Opening TikTok Studio content list...", 35)
-            page.goto("https://www.tiktok.com/tiktokstudio/content", wait_until="domcontentloaded", timeout=45000)
-            page.wait_for_timeout(4000)
-            if "login" in page.url.lower():
-                return {
-                    "ok": False,
-                    "synced": 0,
-                    "scanned": 0,
-                    "message": "TikTok session expired (redirected to login). Re-import cookies.",
-                }
+            urls_to_try = [
+                ("https://www.tiktok.com/tiktokstudio/content", "Opening TikTok Studio content list...", 30),
+                ("https://www.tiktok.com/tiktokstudio/analytics/content", "Checking TikTok Studio analytics view...", 55),
+            ]
+            for target_url, label, pct in urls_to_try:
+                _prog(label, pct)
+                page.goto(target_url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(3000)
+                landed_url = page.url
 
-            _dismiss_modals(page)
-            page.wait_for_timeout(2000)
+                if "login" in landed_url.lower():
+                    return {
+                        "ok": False,
+                        "synced": 0,
+                        "scanned": 0,
+                        "message": "TikTok session expired (redirected to login). Re-import cookies.",
+                    }
 
-            _prog("Extracting video view & engagement metrics...", 65)
-            # Extract rows from TikTok Studio content table / list
-            scraped_items = page.evaluate("""
-                () => {
-                    const results = [];
-                    const rows = document.querySelectorAll('tr, [role="row"], [class*="video-item"], [class*="VideoRow"]');
-                    rows.forEach((row) => {
-                        const text = (row.innerText || '').trim();
-                        if (!text || text.length < 6) return;
-                        const linkEl = row.querySelector('a[href*="/video/"]');
-                        const href = linkEl ? linkEl.href : '';
-                        const cells = Array.from(row.querySelectorAll('td, [role="cell"]'))
-                            .map((c) => (c.innerText || '').trim())
-                            .filter(Boolean);
-                        results.push({ text, href, cells });
-                    });
-                    return results;
-                }
-            """) or []
+                _dismiss_modals(page)
+
+                # Check if TikTok presented a verification/captcha challenge
+                try:
+                    body_txt = (page.inner_text("body", timeout=2000) or "").lower()
+                    if any(w in body_txt for w in ("verify to continue", "drag the slider", "captcha", "puzzle")):
+                        captcha_detected = True
+                except Exception:
+                    pass
+
+                # Scroll to trigger lazy-loaded rows / paginated API calls
+                for _ in range(2):
+                    try:
+                        page.mouse.wheel(0, 1400)
+                    except Exception:
+                        pass
+                    page.wait_for_timeout(1500)
+
+                _scan_page_hydration_and_dom(page)
+                if api_videos:
+                    break
+
+            # Save a diagnostic screenshot whenever nothing was discovered
+            if not api_videos and not dom_items:
+                try:
+                    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output")
+                    os.makedirs(out_dir, exist_ok=True)
+                    page.screenshot(path=os.path.join(out_dir, "tiktok_analytics_last_sync.png"), full_page=False)
+                except Exception:
+                    pass
         finally:
             browser.close()
 
     _prog("Matching TikTok metrics to local post history...", 85)
     synced = 0
-    for item in scraped_items:
+    matched_post_ids = set()
+
+    # Prefer structured JSON API records first
+    discovered_api = list(api_videos.values())
+    for item in discovered_api:
+        target = _match_post_row(posts, caption=item["caption"], tiktok_id=item["tiktok_id"])
+        if not target:
+            continue
+        upsert_post_analytics(
+            post_id=target["post_id"],
+            views=item["views"],
+            likes=item["likes"],
+            comments=item["comments"],
+            shares=item["shares"],
+            saves=item["saves"],
+            avg_watch_time_sec=item["avg_watch_time_sec"],
+            completion_rate=item["completion_rate"],
+            tiktok_url=item["tiktok_url"] or None,
+            source="tiktok_sync",
+            db_path=db_path,
+        )
+        matched_post_ids.add(target["post_id"])
+        synced += 1
+
+    # Supplement with DOM fallback for any local post not already matched via API
+    for item in dom_items:
         text = item.get("text") or ""
         href = item.get("href") or ""
         tid_match = re.search(r"/video/(\d+)", href)
         tiktok_id = tid_match.group(1) if tid_match else ""
 
         target = _match_post_row(posts, caption=text, tiktok_id=tiktok_id)
-        if not target:
+        if not target or target["post_id"] in matched_post_ids:
             continue
 
-        # Parse numeric metric tokens from table cells or lines (Views, Likes, Comments, Shares)
         metric_candidates: List[int] = []
         for token in re.findall(r"\b\d+(?:\.\d+)?[KMB]?\b", text.upper()):
-            # Ignore 4-digit release years like 1984
             if re.fullmatch(r"19\d\d|20\d\d", token):
                 continue
             metric_candidates.append(_parse_human_number(token))
@@ -401,11 +679,40 @@ def sync_tiktok_analytics(
                 source="tiktok_sync",
                 db_path=db_path,
             )
+            matched_post_ids.add(target["post_id"])
             synced += 1
 
-    msg = f"Synced {synced} post(s) from TikTok Studio ({len(scraped_items)} rows scanned)."
+    total_scanned = len(discovered_api) if discovered_api else len(dom_items)
+    if captcha_detected and total_scanned == 0:
+        msg = (
+            "TikTok Studio requested a verification challenge in headless mode (0 rows scanned). "
+            "Export analytics CSV from TikTok Studio and use Import CSV/JSON, or re-import fresh cookies."
+        )
+        _prog(msg, 100)
+        return {"ok": False, "synced": 0, "scanned": 0, "message": msg}
+
+    if total_scanned == 0:
+        msg = (
+            f"Synced 0 post(s) from TikTok Studio (0 rows scanned at {landed_url or 'tiktokstudio'}). "
+            "Check output/tiktok_analytics_last_sync.png or use Import CSV/JSON."
+        )
+    elif synced == 0:
+        msg = (
+            f"Found {total_scanned} video(s) on TikTok Studio, but 0 matched your local Post History "
+            "(matching artist & title in caption)."
+        )
+    else:
+        src_note = "via TikTok API" if discovered_api else "via DOM"
+        msg = f"Synced {synced} post(s) from TikTok Studio ({total_scanned} scanned {src_note})."
+
     _prog(msg, 100)
-    return {"ok": True, "synced": synced, "scanned": len(scraped_items), "message": msg}
+    return {
+        "ok": True,
+        "synced": synced,
+        "scanned": total_scanned,
+        "api_endpoints": list(dict.fromkeys(intercepted_urls))[:5],
+        "message": msg,
+    }
 
 
 def apply_report_feedback(
