@@ -199,7 +199,7 @@ def synthesize(req: SynthesizeRequest):
                     top_k=int(req.top_k),
                     repetition_penalty=float(req.repetition_penalty),
                     speed=float(req.speed),
-                    enable_text_splitting=(len(text) > 180),
+                    enable_text_splitting=True,
                 )
                 sr = getattr(getattr(xtts_model, "config", None), "audio", None)
                 out_sr = getattr(sr, "output_sample_rate", 24000) if sr is not None else 24000
@@ -211,7 +211,7 @@ def synthesize(req: SynthesizeRequest):
                     "speaker_wav": speaker_arg,
                     "language": req.language or "en",
                     "file_path": raw_tmp,
-                    "split_sentences": len(text) > 180,
+                    "split_sentences": True,
                 }
                 try:
                     tts.tts_to_file(**kwargs, speed=float(req.speed))
