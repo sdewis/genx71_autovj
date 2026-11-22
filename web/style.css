@@ -403,6 +403,12 @@ select:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.voice-denoise-opt {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0;
+  cursor: pointer;
+}
 .tts-hook-preview {
   font-size: 0.78rem;
   color: var(--muted);

@@ -12,7 +12,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 
-from fastapi import FastAPI, HTTPException, Query, UploadFile, File
+from fastapi import FastAPI, HTTPException, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -531,10 +531,14 @@ def api_tts_voices():
 
 
 @app.post("/api/tts/voices/{region}")
-async def api_upload_voice_sample(region: str, file: UploadFile = File(...)):
+async def api_upload_voice_sample(
+    region: str,
+    file: UploadFile = File(...),
+    denoise: bool = Form(False),
+):
     raw = await file.read()
     try:
-        clip = save_voice_sample(region, file.filename or "voice.wav", raw)
+        clip = save_voice_sample(region, file.filename or "voice.wav", raw, denoise=denoise)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return {"ok": True, "clip": clip, "profiles": list_voice_profiles()}

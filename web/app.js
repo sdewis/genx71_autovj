@@ -1013,9 +1013,16 @@ async function loadVoiceProfiles() {
 
 async function uploadVoiceFile(region, file) {
   if (!file) return;
-  setVoiceMsg(`Converting & normalizing ${file.name} for ${region.toUpperCase()} voice...`, "muted");
+  const denoise = Boolean(document.getElementById(`voice-${region}-denoise`)?.checked);
+  setVoiceMsg(
+    denoise
+      ? `Cleaning background noise & normalizing ${file.name} for ${region.toUpperCase()} voice...`
+      : `Converting & normalizing ${file.name} for ${region.toUpperCase()} voice...`,
+    "muted"
+  );
   const form = new FormData();
   form.append("file", file);
+  form.append("denoise", denoise ? "true" : "false");
   try {
     const res = await fetch(`/api/tts/voices/${region}`, { method: "POST", body: form });
     const data = await res.json().catch(() => ({}));
@@ -1023,7 +1030,8 @@ async function uploadVoiceFile(region, file) {
       setVoiceMsg(data.detail || `Upload failed (HTTP ${res.status})`, "err");
       return;
     }
-    setVoiceMsg(`Saved ${region.toUpperCase()} clip: ${data.clip.filename} (${data.clip.duration}s)`, "ok");
+    const cleanTag = data.clip && data.clip.denoised ? ", noise cleaned" : "";
+    setVoiceMsg(`Saved ${region.toUpperCase()} clip: ${data.clip.filename} (${data.clip.duration}s${cleanTag})`, "ok");
     if (data.profiles) {
       renderVoiceProfileRegion("uk", data.profiles.uk);
       renderVoiceProfileRegion("us", data.profiles.us);

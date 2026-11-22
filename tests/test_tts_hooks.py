@@ -82,9 +82,12 @@ def test_voice_profiles_upload_delete_and_regional_routing():
         assert resolve_voice_region("UK", voices_root=tmp) == "uk"
         assert resolve_voice_region("US", voices_root=tmp) == "uk"
 
-        # Upload US -> US tracks route to US, UK tracks stay UK
-        us_clip = save_voice_sample("us", "my_us_voice.wav", us_bytes, voices_root=tmp)
+        # Upload US with background noise cleanup enabled -> US tracks route to US
+        us_clip = save_voice_sample("us", "my_us_voice.wav", us_bytes, voices_root=tmp, denoise=True)
         assert us_clip["region"] == "us"
+        assert us_clip["denoised"] is True
+        assert "_clean_" in us_clip["filename"]
+        assert us_clip["duration"] >= 2.5
         assert resolve_voice_region("US", voices_root=tmp) == "us"
         assert resolve_voice_region("UK", voices_root=tmp) == "uk"
         assert resolve_voice_region("UK", requested_region="us", voices_root=tmp) == "us"

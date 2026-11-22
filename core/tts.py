@@ -112,10 +112,13 @@ def save_voice_sample(
     original_filename: str,
     raw_bytes: bytes,
     voices_root: Optional[str] = None,
+    denoise: bool = False,
 ) -> Dict[str, Any]:
     """
     Convert an uploaded audio clip (WAV/MP3/M4A/OGG/WEBM/etc.) into a clean,
     normalized 22.05kHz mono 16-bit PCM WAV suitable for XTTS-v2 zero-shot cloning.
+    When `denoise=True`, applies FFmpeg spectral noise reduction + gentle gating
+    to strip background room noise, hum, and hiss before cloning.
     """
     if not raw_bytes or len(raw_bytes) < 256:
         raise ValueError("Uploaded audio file is empty or too small.")
@@ -128,15 +131,25 @@ def save_voice_sample(
     ts = int(time.time())
     stem = _safe_stem(original_filename)
     tmp_in = os.path.join(target_dir, f".upload_{ts}_{stem}{ext or '.bin'}")
-    out_name = f"{stem}_{ts}.wav"
+    out_name = f"{stem}_clean_{ts}.wav" if denoise else f"{stem}_{ts}.wav"
     out_path = os.path.join(target_dir, out_name)
 
     try:
         with open(tmp_in, "wb") as f:
             f.write(raw_bytes)
 
-        # Normalize to clean 22050Hz mono PCM WAV with gentle rumble filter + loudnorm
-        af = "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=9"
+        # Normalize to clean 22050Hz mono PCM WAV; optionally strip background noise
+        if denoise:
+            af = (
+                "highpass=f=100,"
+                "lowpass=f=8500,"
+                "afftdn=nr=14:nf=-25:tn=1,"
+                "agate=threshold=0.016:ratio=3:attack=10:release=150,"
+                "loudnorm=I=-16:TP=-1.5:LRA=9"
+            )
+        else:
+            af = "highpass=f=80,loudnorm=I=-16:TP=-1.5:LRA=9"
+
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -164,6 +177,7 @@ def save_voice_sample(
             "path": out_path,
             "size_bytes": os.path.getsize(out_path),
             "duration": dur,
+            "denoised": bool(denoise),
         }
     except subprocess.CalledProcessError as exc:
         err = (exc.stderr or b"").decode("utf-8", errors="ignore")[-300:]
