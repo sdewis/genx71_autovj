@@ -139,6 +139,37 @@ def test_radio_ramp_mix_backs_up_start_and_targets_near_59s():
         assert rms_post_drop > rms_end_tts * 3.0
 
 
+def test_long_dj_intro_expands_video_beyond_60s_and_never_chops_sentences():
+    # 1. Verify long facts are NOT chopped mid-sentence (e.g. ending in "and the!")
+    track = {"artist": "Donna Summer", "title": "I Feel Love", "year": 1977, "chart_peak": 1, "chart_region": "UK"}
+    long_fact = (
+        "Produced by Giorgio Moroder and Pete Bellotte using a Moog modular synthesizer "
+        "and the pioneering electronic disco rhythm changed dance music forever."
+    )
+    hook = build_dj_hook_script(track, facts=[long_fact], rng=random.Random(7))
+    assert "changed dance music forever" in hook["text"]
+    assert not hook["text"].lower().endswith("and the!")
+
+    # 2. Verify a 15s DJ intro expands total video duration beyond 60s (~65s) with fade-up after 15.15s
+    with tempfile.TemporaryDirectory() as tmp:
+        raw_track = os.path.join(tmp, "full_song.wav")
+        tts_wav = os.path.join(tmp, "long_dj_hook.wav")
+        out_wav = os.path.join(tmp, "mixed_long.wav")
+
+        _make_sine_wav(raw_track, duration=150.0, freq=260.0, sr=22050)
+        _make_sine_wav(tts_wav, duration=15.0, freq=520.0, sr=22050, amp=0.0)
+
+        info = mix_radio_ramp_audio(
+            raw_track_wav=raw_track,
+            hook_start_sec=40.0,
+            tts_wav_path=tts_wav,
+            out_wav_path=out_wav,
+        )
+        assert info["tts_duration"] == pytest.approx(15.0, abs=0.2)
+        assert info["ramp_start"] >= 15.1
+        assert info["duration"] >= 64.0  # Dynamically expanded past 60s to fit 15s intro + 50s main music!
+
+
 def test_fact_schedule_offsets_after_hook_duration():
     facts = ["Fact one.", "Fact two.", "Fact three."]
     sched = compute_fact_schedule(facts, duration=58.0, start_margin=7.5)

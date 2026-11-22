@@ -12,41 +12,55 @@ import random
 from typing import Any, Dict, List, Optional
 
 
-def _clean_teaser(fact: str, max_words: int = 16) -> str:
-    """Trim a fact into a snappy, speakable single-clause teaser."""
+_TRAILING_STOPWORDS = {
+    "and", "or", "but", "the", "a", "an", "of", "in", "on", "at", "to",
+    "for", "with", "by", "from", "as", "into", "that", "which", "who",
+    "was", "were", "is", "are", "its", "their", "his", "her",
+}
+
+
+def _clean_teaser(fact: str) -> str:
+    """Clean a fact for natural spoken TTS delivery without ever chopping mid-sentence."""
     text = re.sub(r"\s+", " ", (fact or "")).strip()
     if not text:
         return ""
-    # Replace awkward symbols for spoken TTS delivery
-    text = text.replace("—", ", ").replace("–", ", ").replace("…", ".")
+    # If the source fact was truncated with an ellipsis, strip dangling stopwords at the end
+    was_truncated = text.endswith("…") or text.endswith("...")
+    text = text.replace("—", ", ").replace("–", ", ").replace("…", "").rstrip(".")
     text = re.sub(r"#(\d+)", r"number \1", text)
     text = text.replace("&", "and")
-    words = text.split()
-    if len(words) > max_words:
-        # Try cutting cleanly at a clause boundary within max_words
-        trimmed = " ".join(words[:max_words]).rstrip(",;:-")
-        if not trimmed.endswith((".", "!", "?")):
-            trimmed += "!"
-        return trimmed
-    if not text.endswith((".", "!", "?")):
+
+    # Keep the first complete sentence if multiple sentences were concatenated
+    parts = re.split(r"(?<=[.!?])\s+", text)
+    text = parts[0].strip()
+
+    if was_truncated:
+        words = text.split()
+        while len(words) > 4 and words[-1].lower().strip(",;:-'\"") in _TRAILING_STOPWORDS:
+            words.pop()
+        text = " ".join(words).rstrip(",;:-")
+
+    if text and not text.endswith((".", "!", "?")):
         text += "!"
     return text
 
 
 def _pick_best_hook_fact(facts: Optional[List[str]]) -> str:
-    """Choose the punchiest fact (preferring concise, vivid trivia)."""
+    """Choose the punchiest complete fact (preferring non-truncated trivia)."""
     if not facts:
         return ""
     clean = [f.strip() for f in facts if isinstance(f, str) and f.strip()]
     if not clean:
         return ""
-    # Prefer the first curated fact (usually the strongest hook), unless it's overly long
-    best = clean[0]
-    if len(best.split()) > 22:
-        shorter = [f for f in clean if len(f.split()) <= 20]
+    # Prefer complete (non-ellipsis) facts so we never read a cut-off Wikipedia snippet
+    complete = [f for f in clean if not f.endswith("…") and not f.endswith("...")]
+    pool = complete or clean
+    best = pool[0]
+    if len(best.split()) > 26:
+        shorter = [f for f in pool if len(f.split()) <= 24]
         if shorter:
             best = shorter[0]
-    return _clean_teaser(best, max_words=16)
+    return _clean_teaser(best)
 
 
 def get_era_bucket(year: Optional[int]) -> str:

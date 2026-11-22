@@ -365,32 +365,43 @@ def _get_wav_duration_exact(wav_path: str) -> float:
         return float(out)
 
 
+TARGET_TTS_MAIN_DURATION = 50.0  # Full-volume music duration after DJ intro finishes
+
+
 def mix_radio_ramp_audio(
     raw_track_wav: str,
     hook_start_sec: float,
     tts_wav_path: str,
     out_wav_path: str,
-    target_total_duration: float = TARGET_TTS_TOTAL_DURATION,
+    target_total_duration: Optional[float] = None,
+    main_music_duration: float = TARGET_TTS_MAIN_DURATION,
 ) -> Dict[str, float]:
     """
     Classic Radio-DJ 'Talk Up the Post' audio mix:
-      - Backs up start_sec by (tts_duration + post_tts_breath) so the full-volume
-        track hook hits right after the DJ finishes speaking.
+      - Backs up start_sec by (tts_duration + post_tts_breath) so the background music
+        plays longer before the drop and the full-volume fade-up ALWAYS kicks in right
+        after the DJ finishes speaking.
+      - Dynamically expands total video duration beyond 60s whenever needed to fit the
+        entire DJ intro plus the full-volume main track section (never cuts TTS short).
       - Keeps the pre-roll track ducked (~-14 dB) with a warm low-pass filter (1850 Hz)
         for the ENTIRE TTS duration + a 0.15s breath, and ONLY THEN crossfades smoothly
         (0.45s) into crisp 100% full-range stereo.
-      - Targets up to ~58.0s total (strictly <= 58.5s, safely below TikTok's 60s limit).
-      - Falls back cleanly to ducking the opening seconds if source is a 30s preview
-        or hook_start_sec < tts_duration.
     """
     raw_dur = _get_wav_duration_exact(raw_track_wav)
     tts_dur = max(0.5, _get_wav_duration_exact(tts_wav_path))
     post_tts_breath = 0.15
+    intro_len = tts_dur + post_tts_breath
 
-    # Back up start_sec by tts_dur + breath so full-volume swell begins right after speech ends
-    pre_roll_start = max(0.0, hook_start_sec - (tts_dur + post_tts_breath))
+    # Back up start_sec by full intro_len so the main drop lands right on hook_start_sec
+    pre_roll_start = max(0.0, hook_start_sec - intro_len)
+
+    # Expand total clip length dynamically to accommodate the full DJ intro + main music
+    if target_total_duration is not None:
+        desired_dur = max(intro_len + MIN_CLIP_DURATION, float(target_total_duration))
+    else:
+        desired_dur = max(MIN_CLIP_DURATION, intro_len + max(MIN_CLIP_DURATION, float(main_music_duration)))
+
     avail_dur = max(1.0, raw_dur - pre_roll_start)
-    desired_dur = min(MAX_CLIP_DURATION, max(MIN_CLIP_DURATION, float(target_total_duration)))
     raw_clip_dur = min(avail_dur, desired_dur)
 
     # If remaining track after pre_roll_start is shorter than desired, shift start earlier if possible
@@ -399,15 +410,17 @@ def mix_radio_ramp_audio(
         pre_roll_start = max(0.0, pre_roll_start - shift_back)
         raw_clip_dur = min(raw_dur - pre_roll_start, desired_dur)
 
+    # Guarantee total output is always strictly longer than intro_len + xfade + tail
+    min_required_dur = max(MIN_CLIP_DURATION, intro_len + 2.5)
     out_dur = raw_clip_dur
     pad_filter = ""
-    if raw_clip_dur < MIN_CLIP_DURATION:
-        out_dur = MIN_CLIP_DURATION + 0.5
+    if raw_clip_dur < min_required_dur:
+        out_dur = min_required_dur + 0.5
         pad_filter = f",apad=whole_dur={out_dur:.2f}"
 
-    fade_out_start = max(0.0, raw_clip_dur - 1.2)
+    fade_out_start = max(0.0, out_dur - 1.2)
     # Keep bed fully ducked until tts_dur + post_tts_breath, then crossfade up over xfade seconds
-    hold_end = min(tts_dur + post_tts_breath, max(0.6, out_dur - 2.0))
+    hold_end = min(intro_len, max(0.6, out_dur - 2.0))
     xfade = min(0.45, max(0.20, (out_dur - hold_end) * 0.25))
     pre_trim_end = min(out_dur - 0.5, hold_end + xfade)
     main_trim_start = max(0.0, pre_trim_end - xfade)
@@ -424,7 +437,7 @@ def mix_radio_ramp_audio(
         f"[bed_pre][bed_main]acrossfade=d={xfade:.3f}:c1=tri:c2=tri[bed];"
         f"[1:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,"
         f"volume=1.15[vox];"
-        f"[bed][vox]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,"
+        f"[bed][vox]amix=inputs=2:duration=longest:dropout_transition=0:normalize=0,"
         f"alimiter=limit=0.95[out]"
     )
 
@@ -527,22 +540,22 @@ def prepare_track_audio(
 
     tts_duration = 0.0
     if has_tts:
-        # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp
-        est_tts_dur = max(0.5, _get_wav_duration_exact(tts_audio_path))
-        desired_total = float(target_total_duration or TARGET_TTS_TOTAL_DURATION)
-        main_target = max(MIN_CLIP_DURATION, min(MAX_CLIP_DURATION - est_tts_dur, desired_total - est_tts_dur))
+        # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp.
+        # Allow total video length to expand dynamically beyond 60s if the DJ intro is long.
+        main_target = TARGET_TTS_MAIN_DURATION
         hook_start, _ = find_intelligent_clip_window(
             raw_wav,
             target_duration=main_target,
-            min_duration=min(MIN_CLIP_DURATION, main_target),
-            max_duration=min(MAX_CLIP_DURATION, main_target + 2.0),
+            min_duration=MIN_CLIP_DURATION,
+            max_duration=main_target + 4.0,
         )
         mix_info = mix_radio_ramp_audio(
             raw_track_wav=raw_wav,
             hook_start_sec=hook_start,
             tts_wav_path=tts_audio_path,
             out_wav_path=final_wav,
-            target_total_duration=desired_total,
+            target_total_duration=target_total_duration,
+            main_music_duration=main_target,
         )
         tts_duration = mix_info["tts_duration"]
     else:
