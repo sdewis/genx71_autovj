@@ -9,14 +9,28 @@ let pollTimer = null;
 let publishPollTimer = null;
 let settingsReady = null;
 
+const TAB_LABELS = {
+  studio: "Studio",
+  queue: "Scheduled Queue",
+  posts: "Post History",
+  analytics: "Analytics & AI",
+  tracks: "Chart Catalog",
+  admin: "Admin & Settings"
+};
+
 // --- Navigation ---
 document.querySelectorAll(".nav-btn").forEach((btn) => {
   btn.addEventListener("click", () => {
     const target = btn.dataset.tab;
-    document.querySelectorAll(".nav-btn").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".nav-btn").forEach((b) => {
+      b.classList.toggle("active", b.dataset.tab === target);
+    });
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
-    btn.classList.add("active");
-    document.getElementById(`tab-${target}`).classList.add("active");
+    const panel = document.getElementById(`tab-${target}`);
+    if (panel) panel.classList.add("active");
+
+    const crumb = document.getElementById("topbar-breadcrumb");
+    if (crumb) crumb.textContent = TAB_LABELS[target] || target;
 
     if (target === "queue") loadQueue();
     if (target === "posts") loadPosts();
@@ -28,11 +42,38 @@ document.querySelectorAll(".nav-btn").forEach((btn) => {
 
 // --- Status & Polling ---
 function updateQueueNavBadge(count) {
-  const badge = document.getElementById("queue-nav-badge");
-  if (!badge) return;
   const n = Number(count) || 0;
-  badge.textContent = String(n);
-  badge.classList.toggle("hidden", n <= 0);
+  document.querySelectorAll(".queue-nav-badge, #queue-nav-badge").forEach((badge) => {
+    badge.textContent = String(n);
+    badge.classList.toggle("hidden", n <= 0);
+  });
+}
+
+function updateStudioGauges(stats) {
+  const circumference = 502.65;
+  const totalTracks = Number(stats.total_tracks) || 0;
+  const availTracks = Number(stats.available_tracks) || 0;
+  const poolPct = totalTracks > 0 ? Math.round((availTracks / totalTracks) * 100) : 0;
+
+  const poolArc = document.getElementById("gauge-pool-arc");
+  const poolPctEl = document.getElementById("gauge-pool-pct");
+  const poolDetailEl = document.getElementById("gauge-pool-detail");
+  if (poolArc) poolArc.style.strokeDashoffset = String(circumference * (1 - poolPct / 100));
+  if (poolPctEl) poolPctEl.textContent = `${poolPct}%`;
+  if (poolDetailEl) poolDetailEl.textContent = `${availTracks} / ${totalTracks} tracks`;
+
+  const queuedEl = document.getElementById("gauge-queued-val");
+  const wildEl = document.getElementById("gauge-wildcards-val");
+  if (queuedEl) queuedEl.textContent = `${Number(stats.queued_count) || 0} tracks`;
+  if (wildEl) wildEl.textContent = `${Number(stats.available_wildcards) || 0} gems`;
+
+  const totalPosts = Number(stats.total_posts) || 0;
+  const pubCount = Number(stats.published_count) || 0;
+  const pubPct = totalPosts > 0 ? Math.round((pubCount / totalPosts) * 100) : 0;
+  const pubArc = document.getElementById("gauge-pub-arc");
+  const pubPctEl = document.getElementById("gauge-pub-pct");
+  if (pubArc) pubArc.style.strokeDashoffset = String(circumference * (1 - pubPct / 100));
+  if (pubPctEl) pubPctEl.textContent = `${pubPct}%`;
 }
 
 async function refreshStatus() {
@@ -60,6 +101,7 @@ async function refreshStatus() {
     document.getElementById("stat-wildcards").textContent = data.stats.available_wildcards;
     document.getElementById("stat-posted").textContent = `${data.stats.published_count}/${data.stats.total_posts}`;
     updateQueueNavBadge(data.stats.queued_count);
+    updateStudioGauges(data.stats);
 
     if (data.generation && data.generation.running && !pollTimer) {
       startProgressPolling();

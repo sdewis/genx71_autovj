@@ -3,445 +3,643 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <meta name="theme-color" content="#090a10" />
+  <meta name="theme-color" content="#060b26" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <title>GenX71 AutoVJ Studio</title>
   <link rel="manifest" href="/manifest.json" />
   <link rel="icon" href="/logo.png" type="image/png" />
-  <link rel="stylesheet" href="/static/style.css?v=3.0" />
+  <link rel="stylesheet" href="/static/style.css?v=4.0" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <img src="/logo.png" alt="Seany GenX" class="brand-logo" />
+  <div class="app-shell">
+    <!-- FLOATING VISION UI DESKTOP SIDEBAR -->
+    <aside class="v-sidebar" aria-label="Studio Navigation">
       <div>
-        <h1>GENX71 <span class="accent">AUTOVJ</span></h1>
-        <p class="subtitle">1978–1996 Automated TikTok Studio</p>
-      </div>
-    </div>
-    <div class="status-pills">
-      <span id="daemon-pill" class="pill pill-off">Daemon: --</span>
-      <span id="cookie-pill" class="pill pill-warn">Cookies: --</span>
-    </div>
-  </header>
-
-  <main class="container">
-    <!-- TAB 1: STUDIO / DASHBOARD -->
-    <section id="tab-studio" class="tab-panel active">
-      <div class="stats-grid">
-        <div class="stat-card">
-          <span class="stat-label">Next Jittered Post</span>
-          <strong id="stat-next-run" class="stat-val">--</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Available Pool</span>
-          <strong id="stat-avail" class="stat-val">--</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Wildcards Left</span>
-          <strong id="stat-wildcards" class="stat-val">--</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Posted / Rendered</span>
-          <strong id="stat-posted" class="stat-val">--</strong>
-        </div>
-      </div>
-
-      <div class="card studio-controls">
-        <h2>Instant Video Generator</h2>
-        <div class="form-row">
-          <label for="gen-template">Visual Style Pack</label>
-          <select id="gen-template">
-            <option value="auto">✨ Auto-Rotate Style Pack (Era-Weighted)</option>
-            <option value="hifi">Hi-Fi Audiophile (3D Vinyl / CD)</option>
-            <option value="vhs">VHS / MTV Broadcast</option>
-            <option value="neon">Neon Tubes (80s Synth)</option>
-            <option value="riso">Risograph Zine Poster</option>
-            <option value="kinetic">Kinetic Color-Block</option>
-            <option value="cassette">Cassette / Boombox Deck</option>
-            <option value="vinyl">Classic: Spinning Vinyl + Tonearm</option>
-            <option value="cd">Classic: 3D CD Jewel Case</option>
-            <option value="retro">Classic: Retro Audiophile Card</option>
-          </select>
-          <label class="checkbox-label" style="margin-top: 6px;">
-            <input type="checkbox" id="gen-era-appropriate" />
-            <span>Classic Era Lock <span class="muted">(Vinyl/Card pre-1988, CD 1988+)</span></span>
-          </label>
-          <label class="checkbox-label" style="margin-top: 4px;">
-            <input type="checkbox" id="gen-auto-queue" />
-            <span>Auto-queue on generate <span class="muted">(automatically add rendered tracks to Queue)</span></span>
-          </label>
-          <label class="checkbox-label" style="margin-top: 4px;">
-            <input type="checkbox" id="gen-tts-enabled" />
-            <span>🎙️ Voice Hook TTS <span class="muted">(cloned DJ intro + ~58s radio ramp, queues as TTS pending)</span></span>
-          </label>
-        </div>
-
-        <div id="gen-tts-options" class="form-row hidden" style="margin-top: 8px;">
-          <label for="gen-voice-region">DJ Voice Profile</label>
-          <select id="gen-voice-region">
-            <option value="">Auto (🇬🇧 UK for UK tracks / 🇺🇸 US for US tracks)</option>
-            <option value="uk">🇬🇧 UK British Voice</option>
-            <option value="us">🇺🇸 US American Voice</option>
-          </select>
-          <input type="text" id="gen-custom-hook" placeholder="Optional: Custom DJ hook line (leave blank for era-specific auto hook)" style="margin-top: 6px;" />
-        </div>
-
-        <div class="btn-group">
-          <button id="btn-gen-random" class="btn btn-primary">Generate GenX Hit</button>
-          <button id="btn-gen-wildcard" class="btn btn-accent">Wildcard Gem (Top 21–40)</button>
-        </div>
-
-        <div id="gen-progress-box" class="progress-box hidden">
-          <div class="progress-bar-bg">
-            <div id="gen-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+        <div class="sidebar-brand">
+          <img src="/logo.png" alt="Seany GenX" class="brand-logo" />
+          <div>
+            <div class="sidebar-brand-title">GENX71 <span class="accent">AUTOVJ</span></div>
+            <div class="sidebar-brand-sub">1978–1996 TikTok Studio</div>
           </div>
-          <p id="gen-progress-msg" class="progress-msg">Starting...</p>
         </div>
+
+        <hr class="v-divider" />
+
+        <nav class="sidebar-nav">
+          <button type="button" class="nav-btn active" data-tab="studio">
+            <span class="sidebar-icon-box" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/></svg>
+            </span>
+            <span>Studio</span>
+          </button>
+
+          <button type="button" class="nav-btn" data-tab="queue">
+            <span class="sidebar-icon-box" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="3"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
+            </span>
+            <span>Queue</span>
+            <span id="sidebar-queue-badge" class="sidebar-badge queue-nav-badge hidden">0</span>
+          </button>
+
+          <button type="button" class="nav-btn" data-tab="posts">
+            <span class="sidebar-icon-box" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M10 9l5 3-5 3V9z"/></svg>
+            </span>
+            <span>History</span>
+          </button>
+
+          <button type="button" class="nav-btn" data-tab="analytics">
+            <span class="sidebar-icon-box" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19h16M7 15v-4M12 15V7M17 15v-6"/></svg>
+            </span>
+            <span>Analytics</span>
+          </button>
+
+          <div class="sidebar-section-label">Catalog &amp; System</div>
+
+          <button type="button" class="nav-btn" data-tab="tracks">
+            <span class="sidebar-icon-box" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>
+            </span>
+            <span>Charts</span>
+          </button>
+
+          <button type="button" class="nav-btn" data-tab="admin">
+            <span class="sidebar-icon-box" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09a1.65 1.65 0 00-1-1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09a1.65 1.65 0 001.51-1 1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06a1.65 1.65 0 001.82.33h.01a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51h.01a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82v.01a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+            </span>
+            <span>Admin</span>
+          </button>
+        </nav>
       </div>
 
-      <div id="preview-card" class="card preview-card hidden">
-        <div class="preview-header">
-          <h3 id="preview-title">Latest Render</h3>
-          <span id="preview-badge" class="badge">--</span>
+      <div class="sidebar-promo">
+        <div class="sidebar-promo-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.9 6.26L22 9.27l-5 4.87L18.18 22 12 18.56 5.82 22 7 14.14l-5-4.87 7.1-1.01L12 2z"/></svg>
         </div>
-        <div class="video-wrapper">
-          <video id="preview-video" controls playsinline></video>
-        </div>
-        <div class="btn-group-3" style="margin-top: 12px;">
-          <button id="btn-publish-preview" class="btn btn-primary">Send to TikTok</button>
-          <button id="btn-queue-preview" class="btn btn-accent">Queue for Next Post</button>
-          <a id="btn-download-preview" class="btn btn-secondary" download>Download MP4</a>
-        </div>
-        <div id="publish-preview-progress-box" class="progress-box hidden">
-          <div class="progress-bar-bg">
-            <div id="publish-preview-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
-          </div>
-          <p id="publish-preview-progress-msg" class="progress-msg">Starting TikTok upload...</p>
-        </div>
+        <div class="sidebar-promo-title">AutoVJ Studio</div>
+        <div class="sidebar-promo-sub">Automated 1978–1996 TikTok Video Engine</div>
+        <button type="button" class="sidebar-promo-btn" onclick="document.querySelector('.nav-btn[data-tab=\'studio\']').click(); document.getElementById('btn-gen-random').click();">
+          Quick Generate Hit
+        </button>
       </div>
-    </section>
+    </aside>
 
-    <!-- TAB 2: SCHEDULED QUEUE -->
-    <section id="tab-queue" class="tab-panel">
-      <div class="section-header">
-        <h2>Scheduled Post Queue</h2>
-        <div class="section-actions">
-          <button id="btn-clear-queue" class="btn btn-small btn-danger-outline hidden">Clear All</button>
-          <button id="btn-refresh-queue" class="btn btn-small">Refresh</button>
-        </div>
-      </div>
-      <div class="card queue-summary">
-        <span class="muted">Next scheduled slot: <strong id="queue-next-run" style="color: var(--cyan);">--</strong></span>
-        <span class="muted">Drag cards or use ⬆️ / ⬇️ to reorder</span>
-      </div>
-      <div id="publish-queue-progress-box" class="card progress-box hidden" style="margin-top: 0;">
-        <div class="progress-bar-bg">
-          <div id="publish-queue-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
-        </div>
-        <p id="publish-queue-progress-msg" class="progress-msg">Starting TikTok upload...</p>
-      </div>
-      <div id="queue-list" class="list-stack"></div>
-    </section>
-
-    <!-- TAB 3: POST HISTORY -->
-    <section id="tab-posts" class="tab-panel">
-      <div class="section-header">
-        <h2>Post History &amp; Deduplication</h2>
-        <button id="btn-refresh-posts" class="btn btn-small">Refresh</button>
-      </div>
-      <div id="publish-posts-progress-box" class="card progress-box hidden" style="margin-top: 0;">
-        <div class="progress-bar-bg">
-          <div id="publish-posts-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
-        </div>
-        <p id="publish-posts-progress-msg" class="progress-msg">Starting TikTok upload...</p>
-      </div>
-      <div id="posts-list" class="list-stack"></div>
-    </section>
-
-    <!-- TAB 3: CHART CATALOG -->
-    <section id="tab-tracks" class="tab-panel">
-      <div class="section-header">
-        <h2>GenX Chart Catalog (1978–1996)</h2>
-        <button id="btn-load-new-tracks" class="btn btn-small btn-accent">✨ Load New Items</button>
-      </div>
-      <div id="tracks-load-status" class="tracks-load-status hidden"></div>
-      <div class="search-bar">
-        <input type="search" id="track-search" placeholder="Search artist, title, or year..." />
-      </div>
-      <details class="card add-track-details">
-        <summary>+ Add Custom GenX Track</summary>
-        <form id="add-track-form" class="form-stack">
-          <input type="text" id="new-artist" placeholder="Artist (e.g. Blancmange)" required />
-          <input type="text" id="new-title" placeholder="Title (e.g. Blind Vision)" required />
-          <div class="form-row-2">
-            <input type="number" id="new-year" placeholder="Year (1983)" min="1970" max="1999" required />
-            <input type="number" id="new-peak" placeholder="Chart Peak (e.g. 10)" min="1" max="100" />
-          </div>
-          <label class="checkbox-label">
-            <input type="checkbox" id="new-wildcard" /> Mark as Wildcard / Unusual Gem
-          </label>
-          <button type="submit" class="btn btn-primary">Add to Pool</button>
-        </form>
-      </details>
-      <div id="tracks-pagination-top" class="pagination-bar hidden"></div>
-      <div id="tracks-list" class="list-stack"></div>
-      <div id="tracks-pagination-bottom" class="pagination-bar hidden"></div>
-    </section>
-
-    <!-- TAB 4: ADMIN & SCHEDULE -->
-    <section id="tab-admin" class="tab-panel">
-      <h2>Admin &amp; Schedule Settings</h2>
-
-      <form id="settings-form" class="card form-stack">
-        <label class="checkbox-label">
-          <input type="checkbox" id="set-sched-enabled" /> Enable 24/7 Background Scheduler
-        </label>
-
-        <div class="form-row">
-          <label for="set-post-times">Daily Post Times (24h comma-separated)</label>
-          <input type="text" id="set-post-times" placeholder="12:30,19:15" />
-        </div>
-
-        <div class="form-row">
-          <label for="set-jitter">Random Time Jitter (+/- Minutes)</label>
-          <input type="number" id="set-jitter" min="0" max="120" />
-        </div>
-
-        <div class="form-row">
-          <label for="set-wildcard">Wildcard (Top 21–40) Chance: <span id="wildcard-val">25</span>%</label>
-          <input type="range" id="set-wildcard" min="0" max="100" step="5" />
-        </div>
-
-        <div class="form-row">
-          <label for="set-template">Default Visual Style Pack</label>
-          <select id="set-template">
-            <option value="auto">✨ Auto-Rotate Style Pack (Era-Weighted)</option>
-            <option value="hifi">Hi-Fi Audiophile (3D Vinyl / CD)</option>
-            <option value="vhs">VHS / MTV Broadcast</option>
-            <option value="neon">Neon Tubes (80s Synth)</option>
-            <option value="riso">Risograph Zine Poster</option>
-            <option value="kinetic">Kinetic Color-Block</option>
-            <option value="cassette">Cassette / Boombox Deck</option>
-            <option value="vinyl">Classic: Spinning Vinyl + Tonearm</option>
-            <option value="cd">Classic: 3D CD Jewel Case</option>
-            <option value="retro">Classic: Retro Audiophile Card</option>
-          </select>
-          <label class="checkbox-label" style="margin-top: 6px;">
-            <input type="checkbox" id="set-era-appropriate" />
-            <span>Classic Era Lock <span class="muted">(Vinyl/Card pre-1988, CD 1988+)</span></span>
-          </label>
-        </div>
-
-        <div class="form-row">
-          <label for="set-wm-opacity">Seany GenX Watermark Opacity: <span id="wm-val">0.40</span></label>
-          <input type="range" id="set-wm-opacity" min="0.1" max="0.9" step="0.05" />
-        </div>
-
-        <label class="checkbox-label">
-          <input type="checkbox" id="set-auto-queue" /> Auto-queue on generate (add rendered tracks to scheduled Queue)
-        </label>
-
-        <label class="checkbox-label">
-          <input type="checkbox" id="set-tts-enabled" /> 🎙️ Enable Voice Hook TTS by default (uses UK/US voice profiles)
-        </label>
-
-        <label class="checkbox-label">
-          <input type="checkbox" id="set-auto-publish" /> Auto-Publish Directly (uncheck to save as TikTok Drafts)
-        </label>
-
-        <button type="submit" class="btn btn-primary">Save Schedule &amp; Settings</button>
-      </form>
-
-      <div class="card form-stack" style="margin-top: 16px;">
-        <div class="voice-profile-header">
-          <h3>🎙️ Voice Hook &amp; Regional TTS Studio</h3>
-          <span id="tts-worker-pill" class="pill pill-off">TTS Worker: --</span>
-        </div>
-        <p class="muted">Upload 1–3 clean 10–30s voice clips (WAV/MP3/M4A) per accent. US chart tracks automatically use your <strong>US</strong> voice if uploaded (falling back to <strong>UK</strong>).</p>
-
-        <div class="voice-profiles-grid">
-          <div class="voice-profile-box">
-            <div class="voice-profile-header">
-              <strong>🇬🇧 UK British Voice</strong>
-              <span id="voice-uk-badge" class="badge">0 clips</span>
+    <!-- MAIN CONTENT COLUMN -->
+    <div class="main-column">
+      <header class="topbar">
+        <div class="topbar-left">
+          <img src="/logo.png" alt="Seany GenX" class="brand-logo mobile-brand-logo" />
+          <div>
+            <div class="breadcrumb">
+              <span>Pages</span>
+              <span>/</span>
+              <strong id="topbar-breadcrumb">Studio</strong>
             </div>
-            <input type="file" id="voice-uk-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm" class="sr-only" />
+            <h1 id="topbar-title">GENX71 <span class="accent">AUTOVJ</span></h1>
+          </div>
+        </div>
+        <div class="status-pills">
+          <span id="daemon-pill" class="pill pill-off">Daemon: --</span>
+          <span id="cookie-pill" class="pill pill-warn">Cookies: --</span>
+        </div>
+      </header>
+
+      <main class="container">
+        <!-- TAB 1: STUDIO / DASHBOARD -->
+        <section id="tab-studio" class="tab-panel active">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Next Jittered Post</span>
+                <strong id="stat-next-run" class="stat-val">--</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Available Pool</span>
+                <strong id="stat-avail" class="stat-val">--</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Wildcards Left</span>
+                <strong id="stat-wildcards" class="stat-val">--</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 7.4h7.6l-6.15 4.47 2.35 7.43L12 16.84 5.8 21.3l2.35-7.43L2 9.4h7.6z"/></svg>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Posted / Rendered</span>
+                <strong id="stat-posted" class="stat-val">--</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+              </div>
+            </div>
+          </div>
+
+          <div class="studio-bento">
+            <!-- Hero Instant Video Generator Card -->
+            <div class="card hero-card studio-controls">
+              <div class="hero-eyebrow">
+                <span>1978–1996 Automated TikTok Studio</span>
+                <span class="badge">Instant Studio</span>
+              </div>
+              <h2>Instant Video Generator</h2>
+              <div class="form-row">
+                <label for="gen-template">Visual Style Pack</label>
+                <select id="gen-template">
+                  <option value="auto">✨ Auto-Rotate Style Pack (Era-Weighted)</option>
+                  <option value="hifi">Hi-Fi Audiophile (3D Vinyl / CD)</option>
+                  <option value="vhs">VHS / MTV Broadcast</option>
+                  <option value="neon">Neon Tubes (80s Synth)</option>
+                  <option value="riso">Risograph Zine Poster</option>
+                  <option value="kinetic">Kinetic Color-Block</option>
+                  <option value="cassette">Cassette / Boombox Deck</option>
+                  <option value="vinyl">Classic: Spinning Vinyl + Tonearm</option>
+                  <option value="cd">Classic: 3D CD Jewel Case</option>
+                  <option value="retro">Classic: Retro Audiophile Card</option>
+                </select>
+                <label class="checkbox-label" style="margin-top: 8px;">
+                  <input type="checkbox" id="gen-era-appropriate" />
+                  <span>Classic Era Lock <span class="muted">(Vinyl/Card pre-1988, CD 1988+)</span></span>
+                </label>
+                <label class="checkbox-label" style="margin-top: 4px;">
+                  <input type="checkbox" id="gen-auto-queue" />
+                  <span>Auto-queue on generate <span class="muted">(automatically add rendered tracks to Queue)</span></span>
+                </label>
+                <label class="checkbox-label" style="margin-top: 4px;">
+                  <input type="checkbox" id="gen-tts-enabled" />
+                  <span>🎙️ Voice Hook TTS <span class="muted">(cloned DJ intro + ~58s radio ramp, queues as TTS pending)</span></span>
+                </label>
+              </div>
+
+              <div id="gen-tts-options" class="form-row hidden" style="margin-top: 8px;">
+                <label for="gen-voice-region">DJ Voice Profile</label>
+                <select id="gen-voice-region">
+                  <option value="">Auto (🇬🇧 UK for UK tracks / 🇺🇸 US for US tracks)</option>
+                  <option value="uk">🇬🇧 UK British Voice</option>
+                  <option value="us">🇺🇸 US American Voice</option>
+                </select>
+                <input type="text" id="gen-custom-hook" placeholder="Optional: Custom DJ hook line (leave blank for era-specific auto hook)" style="margin-top: 6px;" />
+              </div>
+
+              <div class="btn-group">
+                <button id="btn-gen-random" class="btn btn-primary">Generate GenX Hit</button>
+                <button id="btn-gen-wildcard" class="btn btn-accent">Wildcard Gem (Top 21–40)</button>
+              </div>
+
+              <div id="gen-progress-box" class="progress-box hidden">
+                <div class="progress-bar-bg">
+                  <div id="gen-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+                </div>
+                <p id="gen-progress-msg" class="progress-msg">Starting...</p>
+              </div>
+            </div>
+
+            <!-- Live Vision UI Gauges Column -->
+            <div class="studio-gauges-col">
+              <!-- Pool Freshness Gauge -->
+              <div class="card gauge-card">
+                <div class="gauge-head">
+                  <h3>Catalog Pool Freshness</h3>
+                  <p class="muted">Unused 1978–1996 chart hits ready to render</p>
+                </div>
+                <div class="gauge-ring-wrap">
+                  <svg class="gauge-ring-svg" viewBox="0 0 200 200">
+                    <defs>
+                      <linearGradient id="poolGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                        <stop offset="0%" stop-color="rgba(0, 117, 255, 0.1)" />
+                        <stop offset="100%" stop-color="#0075ff" />
+                      </linearGradient>
+                    </defs>
+                    <circle cx="100" cy="100" r="80" stroke="#22234B" stroke-width="14" fill="none" />
+                    <circle id="gauge-pool-arc" cx="100" cy="100" r="80" stroke="url(#poolGrad)" stroke-width="14" fill="none" stroke-linecap="round" stroke-dasharray="502.65" stroke-dashoffset="502.65" style="transition: stroke-dashoffset 0.5s ease;" />
+                  </svg>
+                  <div class="gauge-ring-center">
+                    <span id="gauge-pool-pct" class="gauge-ring-pct">--%</span>
+                    <span class="gauge-ring-sub">Fresh Pool</span>
+                  </div>
+                </div>
+                <div class="gauge-footer-pill">
+                  <span>0%</span>
+                  <strong id="gauge-pool-detail">Loading pool...</strong>
+                  <span>100%</span>
+                </div>
+              </div>
+
+              <!-- Publish & Queue Overview Gauge -->
+              <div class="card gauge-card">
+                <div class="gauge-head">
+                  <h3>Studio Pipeline</h3>
+                  <p class="muted">Live queue &amp; publish completion ratio</p>
+                </div>
+                <div class="gauge-body-split">
+                  <div class="gauge-subcards">
+                    <div class="v-subcard">
+                      <div class="v-subcard-label">Scheduled Queue</div>
+                      <div id="gauge-queued-val" class="v-subcard-val">-- tracks</div>
+                    </div>
+                    <div class="v-subcard">
+                      <div class="v-subcard-label">Wildcards Ready</div>
+                      <div id="gauge-wildcards-val" class="v-subcard-val">-- gems</div>
+                    </div>
+                  </div>
+                  <div class="gauge-ring-wrap" style="width: 126px; height: 126px;">
+                    <svg class="gauge-ring-svg" viewBox="0 0 200 200">
+                      <defs>
+                        <linearGradient id="pubGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                          <stop offset="0%" stop-color="rgba(5, 205, 153, 0.1)" />
+                          <stop offset="100%" stop-color="#05CD99" />
+                        </linearGradient>
+                      </defs>
+                      <circle cx="100" cy="100" r="80" stroke="#22234B" stroke-width="14" fill="none" />
+                      <circle id="gauge-pub-arc" cx="100" cy="100" r="80" stroke="url(#pubGrad)" stroke-width="14" fill="none" stroke-linecap="round" stroke-dasharray="502.65" stroke-dashoffset="502.65" style="transition: stroke-dashoffset 0.5s ease;" />
+                    </svg>
+                    <div class="gauge-ring-center">
+                      <span id="gauge-pub-pct" class="gauge-ring-pct" style="font-size: 1.3rem;">--%</span>
+                      <span class="gauge-ring-sub">Published</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div id="preview-card" class="card preview-card hidden">
+            <div class="preview-header">
+              <h3 id="preview-title">Latest Render</h3>
+              <span id="preview-badge" class="badge">--</span>
+            </div>
+            <div class="video-wrapper">
+              <video id="preview-video" controls playsinline></video>
+            </div>
+            <div class="btn-group-3" style="margin-top: 12px;">
+              <button id="btn-publish-preview" class="btn btn-primary">Send to TikTok</button>
+              <button id="btn-queue-preview" class="btn btn-accent">Queue for Next Post</button>
+              <a id="btn-download-preview" class="btn btn-secondary" download>Download MP4</a>
+            </div>
+            <div id="publish-preview-progress-box" class="progress-box hidden">
+              <div class="progress-bar-bg">
+                <div id="publish-preview-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+              </div>
+              <p id="publish-preview-progress-msg" class="progress-msg">Starting TikTok upload...</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB 2: SCHEDULED QUEUE -->
+        <section id="tab-queue" class="tab-panel">
+          <div class="section-header">
+            <h2>Scheduled Post Queue</h2>
             <div class="section-actions">
-              <label for="voice-uk-input" class="btn btn-secondary btn-small" style="cursor:pointer;">+ Upload UK Clip</label>
-              <button type="button" id="btn-test-uk" class="btn btn-small" onclick="testVoiceProfile('uk')">🔊 Test UK</button>
+              <button id="btn-clear-queue" class="btn btn-small btn-danger-outline hidden">Clear All</button>
+              <button id="btn-refresh-queue" class="btn btn-small">Refresh</button>
             </div>
-            <label class="checkbox-row voice-denoise-opt">
-              <input type="checkbox" id="voice-uk-denoise" checked /> 🧹 Clean up background noise
-            </label>
-            <div id="voice-uk-list" class="list-stack"></div>
           </div>
+          <div class="card queue-summary">
+            <span class="muted">Next scheduled slot: <strong id="queue-next-run" style="color: var(--cyan);">--</strong></span>
+            <span class="muted">Drag cards or use ⬆️ / ⬇️ to reorder</span>
+          </div>
+          <div id="publish-queue-progress-box" class="card progress-box hidden" style="margin-top: 0;">
+            <div class="progress-bar-bg">
+              <div id="publish-queue-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+            <p id="publish-queue-progress-msg" class="progress-msg">Starting TikTok upload...</p>
+          </div>
+          <div id="queue-list" class="list-stack"></div>
+        </section>
 
-          <div class="voice-profile-box">
+        <!-- TAB 3: POST HISTORY -->
+        <section id="tab-posts" class="tab-panel">
+          <div class="section-header">
+            <h2>Post History &amp; Deduplication</h2>
+            <button id="btn-refresh-posts" class="btn btn-small">Refresh</button>
+          </div>
+          <div id="publish-posts-progress-box" class="card progress-box hidden" style="margin-top: 0;">
+            <div class="progress-bar-bg">
+              <div id="publish-posts-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+            </div>
+            <p id="publish-posts-progress-msg" class="progress-msg">Starting TikTok upload...</p>
+          </div>
+          <div id="posts-list" class="list-stack"></div>
+        </section>
+
+        <!-- TAB 4: CHART CATALOG -->
+        <section id="tab-tracks" class="tab-panel">
+          <div class="section-header">
+            <h2>GenX Chart Catalog (1978–1996)</h2>
+            <button id="btn-load-new-tracks" class="btn btn-small btn-accent">✨ Load New Items</button>
+          </div>
+          <div id="tracks-load-status" class="tracks-load-status hidden"></div>
+          <div class="search-bar">
+            <input type="search" id="track-search" placeholder="Search artist, title, or year..." />
+          </div>
+          <details class="card add-track-details">
+            <summary>+ Add Custom GenX Track</summary>
+            <form id="add-track-form" class="form-stack">
+              <input type="text" id="new-artist" placeholder="Artist (e.g. Blancmange)" required />
+              <input type="text" id="new-title" placeholder="Title (e.g. Blind Vision)" required />
+              <div class="form-row-2">
+                <input type="number" id="new-year" placeholder="Year (1983)" min="1970" max="1999" required />
+                <input type="number" id="new-peak" placeholder="Chart Peak (e.g. 10)" min="1" max="100" />
+              </div>
+              <label class="checkbox-label">
+                <input type="checkbox" id="new-wildcard" /> Mark as Wildcard / Unusual Gem
+              </label>
+              <button type="submit" class="btn btn-primary">Add to Pool</button>
+            </form>
+          </details>
+          <div id="tracks-pagination-top" class="pagination-bar hidden"></div>
+          <div id="tracks-list" class="list-stack"></div>
+          <div id="tracks-pagination-bottom" class="pagination-bar hidden"></div>
+        </section>
+
+        <!-- TAB 5: ADMIN & SCHEDULE -->
+        <section id="tab-admin" class="tab-panel">
+          <h2>Admin &amp; Schedule Settings</h2>
+
+          <form id="settings-form" class="card form-stack">
+            <label class="checkbox-label">
+              <input type="checkbox" id="set-sched-enabled" /> Enable 24/7 Background Scheduler
+            </label>
+
+            <div class="form-row-2">
+              <div class="form-row" style="margin-bottom: 0;">
+                <label for="set-post-times">Daily Post Times (24h comma-separated)</label>
+                <input type="text" id="set-post-times" placeholder="12:30,19:15" />
+              </div>
+              <div class="form-row" style="margin-bottom: 0;">
+                <label for="set-jitter">Random Time Jitter (+/- Minutes)</label>
+                <input type="number" id="set-jitter" min="0" max="120" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <label for="set-wildcard">Wildcard (Top 21–40) Chance: <span id="wildcard-val">25</span>%</label>
+              <input type="range" id="set-wildcard" min="0" max="100" step="5" />
+            </div>
+
+            <div class="form-row">
+              <label for="set-template">Default Visual Style Pack</label>
+              <select id="set-template">
+                <option value="auto">✨ Auto-Rotate Style Pack (Era-Weighted)</option>
+                <option value="hifi">Hi-Fi Audiophile (3D Vinyl / CD)</option>
+                <option value="vhs">VHS / MTV Broadcast</option>
+                <option value="neon">Neon Tubes (80s Synth)</option>
+                <option value="riso">Risograph Zine Poster</option>
+                <option value="kinetic">Kinetic Color-Block</option>
+                <option value="cassette">Cassette / Boombox Deck</option>
+                <option value="vinyl">Classic: Spinning Vinyl + Tonearm</option>
+                <option value="cd">Classic: 3D CD Jewel Case</option>
+                <option value="retro">Classic: Retro Audiophile Card</option>
+              </select>
+              <label class="checkbox-label" style="margin-top: 6px;">
+                <input type="checkbox" id="set-era-appropriate" />
+                <span>Classic Era Lock <span class="muted">(Vinyl/Card pre-1988, CD 1988+)</span></span>
+              </label>
+            </div>
+
+            <div class="form-row">
+              <label for="set-wm-opacity">Seany GenX Watermark Opacity: <span id="wm-val">0.40</span></label>
+              <input type="range" id="set-wm-opacity" min="0.1" max="0.9" step="0.05" />
+            </div>
+
+            <label class="checkbox-label">
+              <input type="checkbox" id="set-auto-queue" /> Auto-queue on generate (add rendered tracks to scheduled Queue)
+            </label>
+
+            <label class="checkbox-label">
+              <input type="checkbox" id="set-tts-enabled" /> 🎙️ Enable Voice Hook TTS by default (uses UK/US voice profiles)
+            </label>
+
+            <label class="checkbox-label">
+              <input type="checkbox" id="set-auto-publish" /> Auto-Publish Directly (uncheck to save as TikTok Drafts)
+            </label>
+
+            <button type="submit" class="btn btn-primary">Save Schedule &amp; Settings</button>
+          </form>
+
+          <div class="card form-stack">
             <div class="voice-profile-header">
-              <strong>🇺🇸 US American Voice</strong>
-              <span id="voice-us-badge" class="badge">0 clips</span>
+              <h3>🎙️ Voice Hook &amp; Regional TTS Studio</h3>
+              <span id="tts-worker-pill" class="pill pill-off">TTS Worker: --</span>
             </div>
-            <input type="file" id="voice-us-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm" class="sr-only" />
-            <div class="section-actions">
-              <label for="voice-us-input" class="btn btn-secondary btn-small" style="cursor:pointer;">+ Upload US Clip</label>
-              <button type="button" id="btn-test-us" class="btn btn-small" onclick="testVoiceProfile('us')">🔊 Test US</button>
+            <p class="muted">Upload 1–3 clean 10–30s voice clips (WAV/MP3/M4A) per accent. US chart tracks automatically use your <strong>US</strong> voice if uploaded (falling back to <strong>UK</strong>).</p>
+
+            <div class="voice-profiles-grid">
+              <div class="voice-profile-box">
+                <div class="voice-profile-header">
+                  <strong>🇬🇧 UK British Voice</strong>
+                  <span id="voice-uk-badge" class="badge">0 clips</span>
+                </div>
+                <input type="file" id="voice-uk-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm" class="sr-only" />
+                <div class="section-actions">
+                  <label for="voice-uk-input" class="btn btn-secondary btn-small" style="cursor:pointer;">+ Upload UK Clip</label>
+                  <button type="button" id="btn-test-uk" class="btn btn-small" onclick="testVoiceProfile('uk')">🔊 Test UK</button>
+                </div>
+                <label class="checkbox-row voice-denoise-opt">
+                  <input type="checkbox" id="voice-uk-denoise" checked /> 🧹 Clean up background noise
+                </label>
+                <div id="voice-uk-list" class="list-stack"></div>
+              </div>
+
+              <div class="voice-profile-box">
+                <div class="voice-profile-header">
+                  <strong>🇺🇸 US American Voice</strong>
+                  <span id="voice-us-badge" class="badge">0 clips</span>
+                </div>
+                <input type="file" id="voice-us-input" accept="audio/*,.wav,.mp3,.m4a,.ogg,.flac,.webm" class="sr-only" />
+                <div class="section-actions">
+                  <label for="voice-us-input" class="btn btn-secondary btn-small" style="cursor:pointer;">+ Upload US Clip</label>
+                  <button type="button" id="btn-test-us" class="btn btn-small" onclick="testVoiceProfile('us')">🔊 Test US</button>
+                </div>
+                <label class="checkbox-row voice-denoise-opt">
+                  <input type="checkbox" id="voice-us-denoise" checked /> 🧹 Clean up background noise
+                </label>
+                <div id="voice-us-list" class="list-stack"></div>
+              </div>
             </div>
-            <label class="checkbox-row voice-denoise-opt">
-              <input type="checkbox" id="voice-us-denoise" checked /> 🧹 Clean up background noise
+
+            <p id="tts-voice-msg" class="muted"></p>
+            <audio id="tts-test-audio" controls class="hidden" style="width:100%; margin-top:4px;"></audio>
+          </div>
+
+          <div class="card form-stack">
+            <h3>TikTok Session Cookies</h3>
+            <p class="muted">Import an exported <code>.json</code> cookie file from your browser (must include <code>sessionid</code>) or paste JSON below to enable automated posting.</p>
+
+            <input type="file" id="cookies-file-input" accept=".json,application/json" class="sr-only" />
+            <label id="cookies-dropzone" for="cookies-file-input" class="file-dropzone" tabindex="0" aria-label="Browse for TikTok cookie JSON file">
+              <div class="file-dropzone-icon">📂</div>
+              <div class="file-dropzone-text">
+                <strong>Import Cookie <code>.json</code> File</strong>
+                <span id="cookies-file-name" class="muted">Tap to browse files or drag &amp; drop here</span>
+              </div>
+              <span class="btn btn-secondary btn-small">Browse…</span>
             </label>
-            <div id="voice-us-list" class="list-stack"></div>
+
+            <div class="divider-label"><span>or paste JSON manually</span></div>
+            <textarea id="cookies-input" rows="4" placeholder='[{"name": "sessionid", "value": "...", "domain": ".tiktok.com"}]'></textarea>
+            <button id="btn-save-cookies" class="btn btn-accent">Save &amp; Validate Cookies</button>
+            <p id="cookie-status-msg" class="muted"></p>
           </div>
-        </div>
 
-        <p id="tts-voice-msg" class="muted"></p>
-        <audio id="tts-test-audio" controls class="hidden" style="width:100%; margin-top:4px;"></audio>
-      </div>
-
-      <div class="card form-stack" style="margin-top: 16px;">
-        <h3>TikTok Session Cookies</h3>
-        <p class="muted">Import an exported <code>.json</code> cookie file from your browser (must include <code>sessionid</code>) or paste JSON below to enable automated posting.</p>
-
-        <input type="file" id="cookies-file-input" accept=".json,application/json" class="sr-only" />
-        <label id="cookies-dropzone" for="cookies-file-input" class="file-dropzone" tabindex="0" aria-label="Browse for TikTok cookie JSON file">
-          <div class="file-dropzone-icon">📂</div>
-          <div class="file-dropzone-text">
-            <strong>Import Cookie <code>.json</code> File</strong>
-            <span id="cookies-file-name" class="muted">Tap to browse files or drag &amp; drop here</span>
+          <div class="card form-stack">
+            <h3>Blacklist</h3>
+            <div id="blacklist-items" class="list-stack"></div>
           </div>
-          <span class="btn btn-secondary btn-small">Browse…</span>
-        </label>
+        </section>
 
-        <div class="divider-label"><span>or paste JSON manually</span></div>
-        <textarea id="cookies-input" rows="4" placeholder='[{"name": "sessionid", "value": "...", "domain": ".tiktok.com"}]'></textarea>
-        <button id="btn-save-cookies" class="btn btn-accent">Save &amp; Validate Cookies</button>
-        <p id="cookie-status-msg" class="muted"></p>
-      </div>
-
-      <div class="card form-stack" style="margin-top: 16px;">
-        <h3>Blacklist</h3>
-        <div id="blacklist-items" class="list-stack"></div>
-      </div>
-    </section>
-
-    <!-- TAB 5: POST ANALYTICS & LOCAL AI ANALYST -->
-    <section id="tab-analytics" class="tab-panel">
-      <div class="section-header">
-        <h2>Post Analytics &amp; AI Analyst</h2>
-        <button id="btn-refresh-analytics" class="btn btn-small">Refresh</button>
-      </div>
-
-      <div class="stats-grid">
-        <div class="stat-card">
-          <span class="stat-label">Total Views</span>
-          <strong id="ana-stat-views" class="stat-val">0</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Avg Engagement</span>
-          <strong id="ana-stat-eng" class="stat-val">0%</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Tracked Posts</span>
-          <strong id="ana-stat-tracked" class="stat-val">0/0</strong>
-        </div>
-        <div class="stat-card">
-          <span class="stat-label">Next Daily Report</span>
-          <strong id="ana-stat-next" class="stat-val">02:00</strong>
-        </div>
-      </div>
-
-      <div class="card form-stack">
-        <div class="voice-profile-header">
-          <h3>🧠 Local CPU-Efficient LLM Analyst</h3>
-          <span id="llm-worker-pill" class="pill pill-off">LLM: --</span>
-        </div>
-        <p class="muted">Runs locally on CPU via Ollama (default <code>qwen3.5:2b</code>, ~1.3 GB RAM) at your scheduled daily time to rank top-performing posts, suggest improvements, and feed winning patterns back into future track selection.</p>
-
-        <div class="form-row-2">
-          <div class="form-row" style="margin-bottom: 0;">
-            <label for="ana-report-time">Daily Report Time (24h)</label>
-            <input type="time" id="ana-report-time" value="02:00" />
+        <!-- TAB 6: POST ANALYTICS & LOCAL AI ANALYST -->
+        <section id="tab-analytics" class="tab-panel">
+          <div class="section-header">
+            <h2>Post Analytics &amp; AI Analyst</h2>
+            <button id="btn-refresh-analytics" class="btn btn-small">Refresh</button>
           </div>
-          <div class="form-row" style="margin-bottom: 0;">
-            <label for="ana-llm-model">Local LLM Model</label>
-            <select id="ana-llm-model">
-              <option value="qwen3.5:2b">Qwen 3.5 2B (Default — Best CPU Efficiency, ~1.3 GB)</option>
-              <option value="qwen3.5:4b">Qwen 3.5 4B (Deeper Reasoning, ~2.7 GB)</option>
-              <option value="qwen3:1.7b">Qwen 3 1.7B (Ultra-Light CPU, ~1.1 GB)</option>
-              <option value="phi4-mini">Phi-4 Mini 3.8B (CPU-Friendly, ~2.5 GB)</option>
-            </select>
+
+          <div class="stats-grid">
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Total Views</span>
+                <strong id="ana-stat-views" class="stat-val">0</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/></svg>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Avg Engagement</span>
+                <strong id="ana-stat-eng" class="stat-val">0%</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 00-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 000-7.78z"/></svg>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Tracked Posts</span>
+                <strong id="ana-stat-tracked" class="stat-val">0/0</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19h16M7 15v-4M12 15V7M17 15v-6"/></svg>
+              </div>
+            </div>
+            <div class="stat-card">
+              <div class="stat-card-body">
+                <span class="stat-label">Next Daily Report</span>
+                <strong id="ana-stat-next" class="stat-val">02:00</strong>
+              </div>
+              <div class="stat-icon-box" aria-hidden="true">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+              </div>
+            </div>
           </div>
-        </div>
 
-        <label class="checkbox-label">
-          <input type="checkbox" id="ana-report-enabled" checked />
-          <span>Enable daily automated analytics report</span>
-        </label>
+          <div class="card form-stack">
+            <div class="voice-profile-header">
+              <h3>🧠 Local CPU-Efficient LLM Analyst</h3>
+              <span id="llm-worker-pill" class="pill pill-off">LLM: --</span>
+            </div>
+            <p class="muted">Runs locally on CPU via Ollama (default <code>qwen3.5:2b</code>, ~1.3 GB RAM) at your scheduled daily time to rank top-performing posts, suggest improvements, and feed winning patterns back into future track selection.</p>
 
-        <label class="checkbox-label">
-          <input type="checkbox" id="ana-auto-sync" checked />
-          <span>Auto-sync existing post stats from TikTok Studio before daily report</span>
-        </label>
+            <div class="form-row-2">
+              <div class="form-row" style="margin-bottom: 0;">
+                <label for="ana-report-time">Daily Report Time (24h)</label>
+                <input type="time" id="ana-report-time" value="02:00" />
+              </div>
+              <div class="form-row" style="margin-bottom: 0;">
+                <label for="ana-llm-model">Local LLM Model</label>
+                <select id="ana-llm-model">
+                  <option value="qwen3.5:2b">Qwen 3.5 2B (Default — Best CPU Efficiency, ~1.3 GB)</option>
+                  <option value="qwen3.5:4b">Qwen 3.5 4B (Deeper Reasoning, ~2.7 GB)</option>
+                  <option value="qwen3:1.7b">Qwen 3 1.7B (Ultra-Light CPU, ~1.1 GB)</option>
+                  <option value="phi4-mini">Phi-4 Mini 3.8B (CPU-Friendly, ~2.5 GB)</option>
+                </select>
+              </div>
+            </div>
 
-        <label class="checkbox-label">
-          <input type="checkbox" id="ana-feedback-enabled" checked />
-          <span>🎯 Feed AI report insights back into future track choices</span>
-        </label>
+            <label class="checkbox-label">
+              <input type="checkbox" id="ana-report-enabled" checked />
+              <span>Enable daily automated analytics report</span>
+            </label>
 
-        <div class="form-row" style="margin-bottom: 0;">
-          <label for="ana-feedback-strength">Track Choice Feedback Strength: <span id="ana-strength-val">50</span>% <span class="muted">(0% = pure random, 100% = strong bias)</span></label>
-          <input type="range" id="ana-feedback-strength" min="0" max="100" step="10" value="50" />
-        </div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="ana-auto-sync" checked />
+              <span>Auto-sync existing post stats from TikTok Studio before daily report</span>
+            </label>
 
-        <div class="analytics-actions-grid">
-          <button type="button" id="btn-run-analytics" class="btn btn-primary">🧠 Run AI Report Now</button>
-          <button type="button" id="btn-sync-analytics" class="btn btn-accent">🔄 Sync from TikTok</button>
-          <button type="button" id="btn-pull-llm" class="btn btn-secondary">⬇️ Pull LLM Model</button>
-          <button type="button" id="btn-save-analytics-cfg" class="btn btn-secondary">💾 Save Config</button>
-        </div>
+            <label class="checkbox-label">
+              <input type="checkbox" id="ana-feedback-enabled" checked />
+              <span>🎯 Feed AI report insights back into future track choices</span>
+            </label>
 
-        <div id="analytics-progress-box" class="progress-box hidden">
-          <div class="progress-bar-bg">
-            <div id="analytics-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+            <div class="form-row" style="margin-bottom: 0;">
+              <label for="ana-feedback-strength">Track Choice Feedback Strength: <span id="ana-strength-val">50</span>% <span class="muted">(0% = pure random, 100% = strong bias)</span></label>
+              <input type="range" id="ana-feedback-strength" min="0" max="100" step="10" value="50" />
+            </div>
+
+            <div class="analytics-actions-grid">
+              <button type="button" id="btn-run-analytics" class="btn btn-primary">🧠 Run AI Report Now</button>
+              <button type="button" id="btn-sync-analytics" class="btn btn-accent">🔄 Sync from TikTok</button>
+              <button type="button" id="btn-pull-llm" class="btn btn-secondary">⬇️ Pull LLM Model</button>
+              <button type="button" id="btn-save-analytics-cfg" class="btn btn-secondary">💾 Save Config</button>
+            </div>
+
+            <div id="analytics-progress-box" class="progress-box hidden">
+              <div class="progress-bar-bg">
+                <div id="analytics-progress-fill" class="progress-bar-fill" style="width: 0%"></div>
+              </div>
+              <p id="analytics-progress-msg" class="progress-msg">Starting...</p>
+            </div>
           </div>
-          <p id="analytics-progress-msg" class="progress-msg">Starting...</p>
-        </div>
-      </div>
 
-      <div class="card form-stack">
-        <div class="voice-profile-header">
-          <h3>📋 Daily AI Performance Report</h3>
-          <select id="ana-report-select" class="report-select" aria-label="Select daily report">
-            <option value="">No reports yet</option>
-          </select>
-        </div>
-        <div id="ana-report-meta" class="muted"></div>
-        <div id="ana-report-body" class="report-body">
-          <p class="muted">Run an AI report or wait for the scheduled 2:00 AM analysis to view top posts, improvement suggestions, and track-selection feedback.</p>
-        </div>
-      </div>
-
-      <div class="card form-stack">
-        <h3>📈 Performance Breakdown</h3>
-        <div id="ana-breakdowns" class="breakdowns-grid">
-          <p class="muted">Add or sync post metrics to see genre, decade, style pack, and wildcard performance charts.</p>
-        </div>
-      </div>
-
-      <div class="card form-stack">
-        <div class="voice-profile-header">
-          <h3>🎬 Existing Posts Metrics</h3>
-          <div class="section-actions">
-            <input type="file" id="analytics-import-input" accept=".csv,.json,text/csv,application/json" class="sr-only" />
-            <label for="analytics-import-input" class="btn btn-secondary btn-small" style="cursor:pointer;">📂 Import CSV/JSON</label>
+          <div class="card form-stack">
+            <div class="voice-profile-header">
+              <h3>📋 Daily AI Performance Report</h3>
+              <select id="ana-report-select" class="report-select" aria-label="Select daily report">
+                <option value="">No reports yet</option>
+              </select>
+            </div>
+            <div id="ana-report-meta" class="muted"></div>
+            <div id="ana-report-body" class="report-body">
+              <p class="muted">Run an AI report or wait for the scheduled 2:00 AM analysis to view top posts, improvement suggestions, and track-selection feedback.</p>
+            </div>
           </div>
-        </div>
-        <p id="ana-import-msg" class="muted"></p>
-        <div id="ana-posts-list" class="list-stack"></div>
-      </div>
-    </section>
-  </main>
+
+          <div class="card form-stack">
+            <h3>📈 Performance Breakdown</h3>
+            <div id="ana-breakdowns" class="breakdowns-grid">
+              <p class="muted">Add or sync post metrics to see genre, decade, style pack, and wildcard performance charts.</p>
+            </div>
+          </div>
+
+          <div class="card form-stack">
+            <div class="voice-profile-header">
+              <h3>🎬 Existing Posts Metrics</h3>
+              <div class="section-actions">
+                <input type="file" id="analytics-import-input" accept=".csv,.json,text/csv,application/json" class="sr-only" />
+                <label for="analytics-import-input" class="btn btn-secondary btn-small" style="cursor:pointer;">📂 Import CSV/JSON</label>
+              </div>
+            </div>
+            <p id="ana-import-msg" class="muted"></p>
+            <div id="ana-posts-list" class="list-stack"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
 
   <!-- Inline Metrics Editor Modal -->
   <div id="metrics-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="metrics-modal-title">
@@ -491,34 +689,35 @@
     </div>
   </div>
 
-  <nav class="bottom-nav">
-    <button class="nav-btn active" data-tab="studio">
+  <!-- MOBILE BOTTOM NAVIGATION -->
+  <nav class="bottom-nav" aria-label="Mobile Navigation">
+    <button type="button" class="nav-btn active" data-tab="studio">
       <span class="nav-icon">🎛️</span>
       <span>Studio</span>
     </button>
-    <button class="nav-btn" data-tab="queue">
+    <button type="button" class="nav-btn" data-tab="queue">
       <span class="nav-icon">📅</span>
       <span>Queue</span>
-      <span id="queue-nav-badge" class="nav-badge hidden">0</span>
+      <span id="queue-nav-badge" class="nav-badge queue-nav-badge hidden">0</span>
     </button>
-    <button class="nav-btn" data-tab="posts">
+    <button type="button" class="nav-btn" data-tab="posts">
       <span class="nav-icon">🎬</span>
       <span>History</span>
     </button>
-    <button class="nav-btn" data-tab="analytics">
+    <button type="button" class="nav-btn" data-tab="analytics">
       <span class="nav-icon">📊</span>
       <span>Analytics</span>
     </button>
-    <button class="nav-btn" data-tab="tracks">
+    <button type="button" class="nav-btn" data-tab="tracks">
       <span class="nav-icon">💿</span>
       <span>Charts</span>
     </button>
-    <button class="nav-btn" data-tab="admin">
+    <button type="button" class="nav-btn" data-tab="admin">
       <span class="nav-icon">⚙️</span>
       <span>Admin</span>
     </button>
   </nav>
 
-  <script src="/static/app.js?v=3.0"></script>
+  <script src="/static/app.js?v=4.0"></script>
 </body>
 </html>
