@@ -572,13 +572,21 @@ async function loadPosts() {
       : "";
 
     let actionsHtml = "";
+    const deleteBtn = status !== "rendering"
+      ? `<button class="btn-small btn-danger-outline" title="Delete render and unlock track for re-rendering" onclick="deletePostRender(${p.id}, '${safeArtist}', '${safeTitle}')">🗑️ Delete</button>`
+      : "";
+
     if (status === "tts_failed") {
       actionsHtml = `
         <button class="btn-small" onclick="retryPostTTS(${p.id})">🔄 Retry TTS</button>
         <button class="btn-small" onclick="renderPostWithoutTTS(${p.id})">🎬 No TTS</button>
+        ${deleteBtn}
       `;
     } else if (status === "tts_pending" || status === "rendering") {
-      actionsHtml = `<button class="btn-small" onclick="renderPostWithoutTTS(${p.id})" title="Skip TTS and render now">⏭️ Skip TTS</button>`;
+      actionsHtml = `
+        <button class="btn-small" onclick="renderPostWithoutTTS(${p.id})" title="Skip TTS and render now">⏭️ Skip TTS</button>
+        ${deleteBtn}
+      `;
     } else {
       const queueBtn = status === "scheduled"
         ? `<button class="btn-small" onclick="document.querySelector('[data-tab=&quot;queue&quot;]').click()">📅 Queued</button>`
@@ -587,6 +595,7 @@ async function loadPosts() {
         ${p.video_url ? `<button class="btn-small" onclick="previewFromList('${p.video_url}', '${safeArtist}', '${safeTitle}', '${safeBadge}', ${p.id})">▶️</button>` : ""}
         ${p.video_url ? queueBtn : ""}
         ${p.video_url ? `<button class="btn-small btn-publish-post" ${publishPollTimer ? "disabled" : ""} onclick="publishPost(${p.id})">🚀 Post</button>` : ""}
+        ${deleteBtn}
       `;
     }
 
@@ -617,6 +626,38 @@ async function loadPosts() {
     postsAutoPollTimer = null;
   }
 }
+
+window.deletePostRender = async (postId, artist, title) => {
+  const label = `${artist || "Track"} — ${title || ""}`.trim();
+  if (!confirm(`Delete render for "${label}"?\n\nThis removes the rendered video file and unlocks the track so you can re-render it.`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/posts/${postId}`, { method: "DELETE" });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert("Delete Error: " + (data.detail || `HTTP ${res.status}`));
+      return;
+    }
+    if (currentPreviewPostId === postId) {
+      currentPreviewPostId = null;
+      const card = document.getElementById("preview-card");
+      const vid = document.getElementById("preview-video");
+      if (vid) {
+        vid.pause();
+        vid.removeAttribute("src");
+        vid.load();
+      }
+      if (card) card.classList.add("hidden");
+    }
+    loadPosts();
+    loadQueue();
+    refreshStatus();
+    if (typeof loadTracks === "function") loadTracks();
+  } catch (err) {
+    alert("Delete Error: " + (err.message || err));
+  }
+};
 
 window.retryPostTTS = async (postId) => {
   const res = await fetch(`/api/posts/${postId}/retry-tts`, { method: "POST" });

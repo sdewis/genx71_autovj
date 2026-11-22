@@ -1,8 +1,9 @@
 """
 FastAPI Backend Server & PWA Host for GenX71 AutoVJ.
-Provides full admin, scheduling, manual generation, video preview,
-cookie management, and deduplication history for both Samsung S24 Ultra PWA
-and Linux desktop browsers.
+Provides full admin, 24/7 jittered scheduling, Chromium Style Pack & Regional TTS
+video generation, video preview, History render deletion/re-rendering, cookie
+management, and deduplication history for both Samsung S24 Ultra PWA and Linux
+desktop browsers.
 """
 
 import os
@@ -23,7 +24,8 @@ from core.db import (
     get_all_tracks, add_track, add_to_blacklist, remove_from_blacklist,
     get_blacklist, get_all_settings, set_setting, get_setting, get_post_by_id,
     update_post_status, update_post_fields, is_track_posted, is_blacklisted,
-    queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue
+    queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue,
+    delete_post
 )
 from core.charts import seed_charts_if_empty
 from core.pipeline import (
@@ -268,6 +270,55 @@ def api_posts(limit: int = Query(50, le=200)):
         else:
             p["video_url"] = None
     return {"posts": posts}
+
+
+def _safe_remove_file_under(file_path: Optional[str], allowed_dir: str) -> bool:
+    """Safely remove file_path only if it exists and resolves inside allowed_dir."""
+    if not file_path:
+        return False
+    try:
+        abs_file = os.path.realpath(file_path)
+        abs_dir = os.path.realpath(allowed_dir)
+        if os.path.commonpath([abs_file, abs_dir]) == abs_dir and os.path.isfile(abs_file):
+            os.remove(abs_file)
+            return True
+    except OSError as e:
+        logger.warning(f"Could not remove file {file_path}: {e}")
+    return False
+
+
+@app.delete("/api/posts/{post_id}")
+def api_delete_post(post_id: int):
+    """
+    Delete a render/post record from History, remove its rendered MP4 (and any
+    per-post cached TTS clip) from disk, and unlock the track so it can be
+    re-rendered.
+    """
+    post = get_post_by_id(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    if post.get("status") == "rendering":
+        raise HTTPException(status_code=409, detail="Cannot delete a post while it is actively rendering.")
+    if publish_state["running"] and publish_state["post_id"] == post_id:
+        raise HTTPException(status_code=409, detail="Cannot delete a post while it is uploading to TikTok.")
+
+    deleted = delete_post(post_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Post not found.")
+
+    video_removed = _safe_remove_file_under(deleted.get("video_path"), OUTPUT_DIR)
+    tts_removed = _safe_remove_file_under(deleted.get("tts_audio_path"), TTS_CACHE_DIR)
+
+    if gen_state.get("last_post") and gen_state["last_post"].get("id") == post_id:
+        gen_state["last_post"] = None
+
+    return {
+        "ok": True,
+        "deleted_id": post_id,
+        "file_removed": video_removed,
+        "tts_removed": tts_removed,
+        "track_unlocked": True,
+    }
 
 
 @app.post("/api/posts/{post_id}/publish")
