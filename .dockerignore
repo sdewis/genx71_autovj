@@ -13,3 +13,10 @@ cache/
 *.wav
 *.tmp
 .DS_Store
+.env
+.env.*
+*.sqlite
+*.sqlite3
+*cookie*.json
+*.pem
+*.key

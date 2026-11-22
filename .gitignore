@@ -8,3 +8,14 @@ cache/
 *.mp4
 *.wav
 *.tmp
+
+# Secrets, databases & local credentials
+.env
+.env.*
+!.env.example
+*.db
+*.sqlite
+*.sqlite3
+*cookie*.json
+*.pem
+*.key
