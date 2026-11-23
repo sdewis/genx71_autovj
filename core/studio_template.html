@@ -48,6 +48,10 @@
     u = clamp(u, 0, 1);
     return 1 - Math.pow(1 - u, 3);
   };
+  const easeInOutCubic = (u) => {
+    u = clamp(u, 0, 1);
+    return u < 0.5 ? 4 * u * u * u : 1 - Math.pow(-2 * u + 2, 3) / 2;
+  };
   const easeOutBack = (u) => {
     u = clamp(u, 0, 1);
     const c1 = 1.70158;
@@ -361,6 +365,373 @@
   }
 
   // =========================================================================
+  // VINYL TURNTABLE TONEARM (Home Cradle -> Auto-Lift -> Hook Cue 24% -> 80%)
+  // =========================================================================
+  const VINYL_TONEARM = {
+    discCx: 665,
+    discCy: 615,
+    discOuterR: 261.2,
+    grooveOuterR: 248.0, // 0% into playable grooves (lead-in)
+    grooveInnerR: 112.0, // 100% into playable grooves (just outside label)
+    startPct: 0.24,      // 24% into record when main audio begins
+    endPct: 0.80,        // 80% into record as main audio ends
+    homeOffsetR: 46.0,   // parked cleanly outside vinyl outer rim
+    pivotX: 934,
+    pivotY: 372,
+    stylusLocalX: -59,
+    stylusLocalY: 298,
+  };
+
+  function tonearmAngleForRadius(r) {
+    const cfg = VINYL_TONEARM;
+    const dx = cfg.discCx - cfg.pivotX;
+    const dy = cfg.discCy - cfg.pivotY;
+    const D = Math.hypot(dx, dy);
+    const L = Math.hypot(cfg.stylusLocalX, cfg.stylusLocalY);
+    const thetaCenter = Math.atan2(dy, dx);
+    const phiLocal = Math.atan2(cfg.stylusLocalY, cfg.stylusLocalX);
+    const cosDelta = clamp((D * D + L * L - r * r) / (2 * D * L), -1, 1);
+    const delta = Math.acos(cosDelta);
+    const a1 = thetaCenter - delta - phiLocal;
+    const a2 = thetaCenter + delta - phiLocal;
+    // Choose the lower-right turntable arm branch (higher y in canvas coords)
+    const y1 = cfg.pivotY + L * Math.sin(phiLocal + a1);
+    const y2 = cfg.pivotY + L * Math.sin(phiLocal + a2);
+    return y1 > y2 ? a1 : a2;
+  }
+
+  function computeVinylTonearmState(t) {
+    const cfg = VINYL_TONEARM;
+    const dur = Math.max(1.0, Number(SCENE && SCENE.duration) || 30.0);
+    const hookDur = (SCENE && SCENE.hook && Number(SCENE.hook.duration) > 0.2)
+      ? Number(SCENE.hook.duration)
+      : 0;
+    const hasHook = hookDur > 0;
+
+    const rHome = cfg.discOuterR + cfg.homeOffsetR;
+    const rStart = lerp(cfg.grooveOuterR, cfg.grooveInnerR, cfg.startPct);
+    const rEnd = lerp(cfg.grooveOuterR, cfg.grooveInnerR, cfg.endPct);
+    const homeAngle = tonearmAngleForRadius(rHome);
+    const startAngle = tonearmAngleForRadius(rStart);
+    const endAngle = tonearmAngleForRadius(rEnd);
+
+    // Phase timing:
+    // - With a spoken DJ hook: stay parked at home briefly while the disc slides out,
+    //   then auto-lift, cue over to the 24% groove, and drop onto the vinyl right as
+    //   the hook finishes and the main audio ramps up.
+    // - Without a hook: auto-lift and cue from home to 24% during the opening ~2.4s.
+    let dropEnd, restEnd, liftDur, dropDur;
+    if (hasHook) {
+      dropEnd = Math.min(hookDur + 0.15, Math.max(1.5, dur * 0.45));
+      const cueSpan = clamp(dropEnd - 1.15, Math.min(1.1, dropEnd * 0.72), 4.0);
+      restEnd = Math.max(0.25, dropEnd - cueSpan);
+      liftDur = clamp(cueSpan * 0.20, 0.22, 0.60);
+      dropDur = clamp(cueSpan * 0.22, 0.22, 0.65);
+    } else {
+      dropEnd = Math.min(2.5, dur * 0.22);
+      restEnd = dropEnd * 0.30;
+      const cueSpan = dropEnd - restEnd;
+      liftDur = cueSpan * 0.22;
+      dropDur = cueSpan * 0.22;
+    }
+
+    const liftEnd = restEnd + liftDur;
+    const dropStart = dropEnd - dropDur;
+    const swingStart = restEnd + liftDur * 0.65;
+    const swingEnd = dropStart + dropDur * 0.20;
+    const mainEnd = Math.max(dropEnd + 0.5, dur - 0.65);
+
+    // Vertical lift height [0 = seated on cradle/record, 1 = lifted by cueing mechanism]
+    let lift = 0;
+    if (t <= restEnd) {
+      lift = 0;
+    } else if (t < liftEnd) {
+      lift = easeOutCubic((t - restEnd) / Math.max(0.01, liftDur));
+    } else if (t <= dropStart) {
+      lift = 1;
+    } else if (t < dropEnd) {
+      lift = 1 - smoothstep((t - dropStart) / Math.max(0.01, dropDur));
+    } else {
+      lift = 0;
+    }
+
+    let armAngle;
+    let phase;
+    let recordPct = null;
+    if (t <= swingStart) {
+      armAngle = homeAngle;
+      phase = t <= restEnd ? "home" : "lift";
+    } else if (t < swingEnd) {
+      const u = easeInOutCubic((t - swingStart) / Math.max(0.01, swingEnd - swingStart));
+      armAngle = lerp(homeAngle, startAngle, u);
+      phase = "cue";
+    } else if (t < dropEnd) {
+      armAngle = startAngle;
+      phase = "drop";
+      recordPct = cfg.startPct;
+    } else {
+      const p = clamp((t - dropEnd) / Math.max(0.1, mainEnd - dropEnd), 0, 1);
+      recordPct = lerp(cfg.startPct, cfg.endPct, p);
+      const r = lerp(rStart, rEnd, p);
+      armAngle = tonearmAngleForRadius(r);
+      phase = "play";
+    }
+
+    const stylusX = cfg.pivotX + cfg.stylusLocalX * Math.cos(armAngle) - cfg.stylusLocalY * Math.sin(armAngle);
+    const stylusY = cfg.pivotY + cfg.stylusLocalX * Math.sin(armAngle) + cfg.stylusLocalY * Math.cos(armAngle);
+    const radiusFromCenter = Math.hypot(stylusX - cfg.discCx, stylusY - cfg.discCy);
+
+    return {
+      phase,
+      lift,
+      armAngle,
+      homeAngle,
+      startAngle,
+      endAngle,
+      stylusX,
+      stylusY,
+      radiusFromCenter,
+      recordPct,
+      restEnd,
+      dropEnd,
+      mainEnd,
+    };
+  }
+
+  function drawVinylTonearm(t, audio, accent, intro) {
+    const cfg = VINYL_TONEARM;
+    const state = computeVinylTonearmState(t);
+    const armAlpha = clamp(intro * 1.4, 0, 1);
+    const pivotX = cfg.pivotX;
+    const pivotY = cfg.pivotY;
+    const { armAngle, homeAngle, startAngle, lift, phase } = state;
+
+    ctx.save();
+    ctx.globalAlpha = armAlpha;
+
+    // 1. Fixed Home Rest Cradle (stays mounted on deck when arm lifts & swings away)
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    ctx.rotate(homeAngle);
+    const restX = -3.5;
+    const restY = 147;
+    // Post shadow
+    ctx.fillStyle = "rgba(0, 0, 0, 0.48)";
+    ctx.beginPath();
+    ctx.arc(restX + 5, restY + 6, 16, 0, Math.PI * 2);
+    ctx.fill();
+    // Base post
+    ctx.fillStyle = "#222633";
+    ctx.beginPath();
+    ctx.arc(restX, restY, 15, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.28)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    // U-shaped cradle jaws that hold the tonearm wand at home
+    ctx.strokeStyle = "#9aa3b8";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(restX - 11.5, restY - 5);
+    ctx.lineTo(restX - 11.5, restY + 7);
+    ctx.moveTo(restX + 11.5, restY - 5);
+    ctx.lineTo(restX + 11.5, restY + 7);
+    ctx.stroke();
+    ctx.restore();
+
+    // 2. Fixed Cueing Lifter Arc (curved metallic lift rail below gimbal)
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    const lifterR = 76;
+    const arcStart = Math.PI / 2 + homeAngle - 0.08;
+    const arcEnd = Math.PI / 2 + startAngle + 0.14;
+    ctx.strokeStyle = lift > 0.05
+      ? `rgba(235, 242, 255, ${0.45 + lift * 0.45})`
+      : "rgba(170, 180, 200, 0.28)";
+    ctx.lineWidth = 5.5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(0, 0, lifterR, arcStart, arcEnd);
+    ctx.stroke();
+    ctx.restore();
+
+    // 3. Fixed Gimbal Base Plinth (96px diameter)
+    ctx.save();
+    ctx.translate(pivotX, pivotY);
+    ctx.shadowColor = "rgba(0, 0, 0, 0.62)";
+    ctx.shadowBlur = 22;
+    ctx.shadowOffsetX = 7;
+    ctx.shadowOffsetY = 12;
+    ctx.fillStyle = "#202431";
+    ctx.beginPath();
+    ctx.arc(0, 0, 48, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowColor = "transparent";
+
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.34)";
+    ctx.lineWidth = 2.8;
+    ctx.stroke();
+
+    // Outer calibrated anti-skate / VTA ring detail
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.14)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(0, 0, 38, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Machined inner gimbal ring
+    ctx.fillStyle = "#353b4d";
+    ctx.beginPath();
+    ctx.arc(0, 0, 29, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.24)";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    ctx.restore();
+
+    // Helper to trace the moving arm geometry (used for both shadow and metallic arm)
+    function traceWandPath() {
+      ctx.beginPath();
+      ctx.moveTo(0, -64);
+      ctx.lineTo(0, 0);
+      ctx.bezierCurveTo(8, 105, -4, 190, -34, 248);
+    }
+
+    // 4. Dynamic Ground/Vinyl Shadow (separates & softens visibly when lifted!)
+    const shOffX = lerp(6, 22, lift);
+    const shOffY = lerp(8, 30, lift);
+    const shBlur = lerp(8, 22, lift);
+    const shAlpha = lerp(0.48, 0.28, lift);
+    ctx.save();
+    ctx.translate(pivotX + shOffX, pivotY + shOffY);
+    ctx.rotate(armAngle);
+    ctx.filter = `blur(${shBlur.toFixed(1)}px)`;
+    ctx.strokeStyle = `rgba(0, 0, 0, ${shAlpha.toFixed(3)})`;
+    ctx.lineWidth = 13.5;
+    ctx.lineCap = "round";
+    traceWandPath();
+    ctx.stroke();
+    // Headshell shadow
+    ctx.save();
+    ctx.translate(-49, 278.5);
+    ctx.rotate(0.46);
+    ctx.fillStyle = `rgba(0, 0, 0, ${shAlpha.toFixed(3)})`;
+    roundRectPath(ctx, -19, -32, 38, 68, 7);
+    ctx.fill();
+    ctx.restore();
+    ctx.restore();
+
+    // 5. Elevated Moving Tonearm Assembly (slight perspective scale & shift on lift)
+    const liftScale = 1.0 + lift * 0.048;
+    const liftDx = -lift * 3.5;
+    const liftDy = -lift * 5.5;
+    ctx.save();
+    ctx.translate(pivotX + liftDx, pivotY + liftDy);
+    ctx.scale(liftScale, liftScale);
+    ctx.rotate(armAngle);
+
+    // Rear counterweight cylinder
+    ctx.fillStyle = "#3a4154";
+    roundRectPath(ctx, -15, -66, 30, 36, 5);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.34)";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    // Tracking-force dial band on counterweight
+    ctx.fillStyle = "#b8c0d4";
+    ctx.fillRect(-15, -42, 30, 5.5);
+    ctx.fillStyle = "rgba(18, 22, 32, 0.55)";
+    ctx.fillRect(-15, -49, 30, 3);
+
+    // Metallic J-curved tonearm wand (12px dark outer bevel + 6.5px bright brushed highlight)
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#778096";
+    ctx.lineWidth = 12;
+    traceWandPath();
+    ctx.stroke();
+
+    ctx.strokeStyle = "#e6ecf7";
+    ctx.lineWidth = 6.5;
+    traceWandPath();
+    ctx.stroke();
+
+    // Gimbal pivot cap (rotates cleanly with arm)
+    ctx.fillStyle = "#b4bccf";
+    ctx.beginPath();
+    ctx.arc(0, 0, 17, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#262b3a";
+    ctx.beginPath();
+    ctx.arc(0, 0, 7.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.35)";
+    ctx.beginPath();
+    ctx.arc(-2, -2, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Cartridge Headshell / Pickup (38x68px authentic 12-inch Hi-Fi SME scale)
+    ctx.save();
+    ctx.translate(-49, 278.5);
+    ctx.rotate(0.46);
+
+    // Sculpted metallic finger-lift handle sticking out on right side of headshell
+    ctx.strokeStyle = "#d5dceb";
+    ctx.lineWidth = 4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(16, -8);
+    ctx.quadraticCurveTo(33, -7, 36, 9);
+    ctx.stroke();
+
+    // Bayonet locking collar where wand meets headshell
+    ctx.fillStyle = "#272c3b";
+    roundRectPath(ctx, -10, -40, 20, 13, 3.5);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+
+    // Main headshell body (38 x 68 px)
+    ctx.fillStyle = rgbStr(accent, 0.96);
+    roundRectPath(ctx, -19, -30, 38, 66, 7);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.45)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+
+    // Recessed inner cartridge shell / top plate
+    ctx.fillStyle = "rgba(14, 17, 26, 0.56)";
+    roundRectPath(ctx, -12.5, -20, 25, 34, 4);
+    ctx.fill();
+
+    // Two metallic cartridge mounting screws
+    ctx.fillStyle = "#d8e0ef";
+    ctx.beginPath();
+    ctx.arc(-7.5, -2, 2.6, 0, Math.PI * 2);
+    ctx.arc(7.5, -2, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Subtle front bevel bar above stylus
+    ctx.fillStyle = "rgba(255, 255, 255, 0.22)";
+    roundRectPath(ctx, -11, 18, 22, 3.5, 1.5);
+    ctx.fill();
+
+    // Subtle glowing cue/tracking dot on headshell nose when needle is in the groove
+    const isPlaying = phase === "play" && lift < 0.05;
+    ctx.fillStyle = isPlaying
+      ? rgbStr(brighten(accent, 1.55), 0.82 + (audio ? audio.onset * 0.18 : 0))
+      : "rgba(255, 255, 255, 0.48)";
+    ctx.beginPath();
+    ctx.arc(0, 27, isPlaying ? 3.8 : 2.6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // =========================================================================
   // STYLE 1: HI-FI AUDIOPHILE (3D Vinyl + Tonearm / Glossy 3D CD / Studio Card)
   // =========================================================================
   function renderHiFi(t, audio) {
@@ -463,39 +834,8 @@
       ctx.fillRect(-discSize / 2, -45, discSize, 90);
       ctx.restore();
 
-      // Metallic Turntable Tonearm on upper-right of vinyl
-      ctx.save();
-      const pivotX = 905;
-      const pivotY = 395;
-      const armAngle = lerp(-0.55, 0.28 + (t / SCENE.duration) * 0.14, easeOutCubic(clamp((t - 0.35) / 0.9, 0, 1)));
-      ctx.translate(pivotX, pivotY);
-      // Gimbal base
-      ctx.fillStyle = "#2b2f3c";
-      ctx.beginPath();
-      ctx.arc(0, 0, 34, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(255,255,255,0.35)";
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-      ctx.fillStyle = "#aeb6c8";
-      ctx.beginPath();
-      ctx.arc(0, 0, 14, 0, Math.PI * 2);
-      ctx.fill();
-      // Arm wand
-      ctx.rotate(armAngle);
-      ctx.strokeStyle = "#d8dee9";
-      ctx.lineWidth = 7;
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-10, 215);
-      ctx.lineTo(-42, 265);
-      ctx.stroke();
-      // Cartridge headshell
-      ctx.fillStyle = rgbStr(accent, 0.95);
-      roundRectPath(ctx, -56, 255, 28, 36, 5);
-      ctx.fill();
-      ctx.restore();
+      // Metallic Turntable Tonearm on upper-right of vinyl (home cradle -> lift -> cue 24% -> 80%)
+      drawVinylTonearm(t, audio, accent, intro);
 
       // Sleeve Cover (elevated with crisp shadow & subtle beat pop)
       const sx = 98 + sleeveSlide;
@@ -1966,6 +2306,7 @@
     }
     ctx.restore();
   };
+  window.computeVinylTonearmState = computeVinylTonearmState;
 })();
 </script>
 </body>

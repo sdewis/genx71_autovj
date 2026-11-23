@@ -224,3 +224,100 @@ def test_api_delete_post_removes_file_and_blocks_rendering():
         if os.path.exists(fake_mp4):
             os.remove(fake_mp4)
 
+
+def test_vinyl_tonearm_home_cue_and_tracking():
+    """
+    Verify the vinyl turntable tonearm starts in its home position outside the
+    disc, auto-lifts and cues to 24% during the hook, and progressively tracks
+    to 80% as the main audio ends (both with and without a DJ hook).
+    """
+    from playwright.sync_api import sync_playwright
+    from core.browser_renderer import STUDIO_HTML_PATH, _launch_chromium
+
+    template_url = f"file://{STUDIO_HTML_PATH}"
+    base_payload = {
+        "style": "hifi",
+        "media_variant": "vinyl",
+        "artist": "The Human League",
+        "title": "Don't You Want Me",
+        "year": 1981,
+        "chart_badge": "UK #1 • 1981",
+        "duration": 50.0,
+        "palette": {
+            "primary": [195, 45, 78],
+            "accent": [255, 82, 118],
+            "bg_dark": [14, 15, 24],
+        },
+        "artwork_data_url": None,
+        "logo_data_url": None,
+        "watermark_opacity": 0.6,
+        "fact_schedule": [],
+        "audio": {
+            "fps": 30,
+            "n_bands": 24,
+            "rms": [0.4] * 60,
+            "bass": [0.4] * 60,
+            "onset": [0.1] * 60,
+            "bands": [[0.4] * 24 for _ in range(60)],
+        },
+    }
+
+    with sync_playwright() as p:
+        browser = _launch_chromium(p)
+        try:
+            page = browser.new_page(viewport={"width": 1080, "height": 1920})
+            page.goto(template_url)
+
+            # 1. With a 6.0s spoken DJ hook
+            payload_hook = dict(base_payload, hook={
+                "text": "Pure 1981 vinyl magic right here!",
+                "duration": 6.0,
+                "voice_rms": [0.5] * 180,
+                "region": "uk",
+            })
+            page.evaluate("async (pl) => await window.initScene(pl)", payload_hook)
+
+            s_home = page.evaluate("window.computeVinylTonearmState(1.0)")
+            assert s_home["phase"] == "home"
+            assert s_home["lift"] == 0
+            assert s_home["radiusFromCenter"] > 261.2  # parked outside vinyl rim
+
+            s_cue = page.evaluate("window.computeVinylTonearmState(4.2)")
+            assert s_cue["phase"] == "cue"
+            assert s_cue["lift"] > 0.9
+
+            s_start = page.evaluate("window.computeVinylTonearmState(6.15)")
+            assert s_start["phase"] == "play"
+            assert s_start["lift"] == 0
+            assert abs(s_start["recordPct"] - 0.24) < 0.005
+
+            s_mid = page.evaluate("window.computeVinylTonearmState(28.0)")
+            assert s_mid["phase"] == "play"
+            assert 0.45 < s_mid["recordPct"] < 0.60
+            assert s_mid["radiusFromCenter"] < s_start["radiusFromCenter"]
+
+            s_end = page.evaluate("window.computeVinylTonearmState(49.35)")
+            assert s_end["phase"] == "play"
+            assert s_end["lift"] == 0
+            assert abs(s_end["recordPct"] - 0.80) < 0.005
+            assert s_end["radiusFromCenter"] < s_mid["radiusFromCenter"]
+
+            # 2. Without a DJ hook (still starts at home, auto-cues to 24%, ends at 80%)
+            payload_no_hook = dict(base_payload, hook=None)
+            page.evaluate("async (pl) => await window.initScene(pl)", payload_no_hook)
+
+            nh_home = page.evaluate("window.computeVinylTonearmState(0.2)")
+            assert nh_home["phase"] == "home"
+            assert nh_home["radiusFromCenter"] > 261.2
+
+            nh_start = page.evaluate("window.computeVinylTonearmState(2.5)")
+            assert nh_start["phase"] == "play"
+            assert abs(nh_start["recordPct"] - 0.24) < 0.005
+
+            nh_end = page.evaluate("window.computeVinylTonearmState(49.35)")
+            assert nh_end["phase"] == "play"
+            assert abs(nh_end["recordPct"] - 0.80) < 0.005
+        finally:
+            browser.close()
+
+
