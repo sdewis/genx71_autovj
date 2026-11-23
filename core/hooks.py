@@ -12,55 +12,139 @@ import random
 from typing import Any, Dict, List, Optional
 
 
-_TRAILING_STOPWORDS = {
-    "and", "or", "but", "the", "a", "an", "of", "in", "on", "at", "to",
-    "for", "with", "by", "from", "as", "into", "that", "which", "who",
-    "was", "were", "is", "are", "its", "their", "his", "her",
+# Hook length definitions (~5-8s spoken DJ intro, safely under XTTS-v2's 250-char English limit)
+HOOK_TARGET_MIN_WORDS = 14
+HOOK_MAX_WORDS = 26
+HOOK_MAX_CHARS = 180
+
+_ABBREVIATIONS = {
+    "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "st", "mt", "ft",
+    "no", "vol", "vs", "feat", "etc", "eg", "ie", "am", "pm",
+    "jan", "feb", "mar", "apr", "aug", "sep", "sept", "oct", "nov", "dec",
 }
+_DOTTED_INITIAL_RE = re.compile(r"^(?:[A-Za-z]\.)+$")
+_SENTENCE_END_RE = re.compile(r"[.!?]+(?:\s+|$)")
+_FACT_REQUIRED_TEMPLATE_IDS = {"univ_did_you_know"}
+
+
+def split_sentences(text: str) -> List[str]:
+    """
+    Split text into complete sentences without breaking on initials or common
+    abbreviations (e.g. T.S. Eliot, J.G. Ballard, P.M. Dawn, Richard D. James, Dr. Dre).
+    """
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if not normalized:
+        return []
+
+    sentences: List[str] = []
+    start = 0
+    for match in _SENTENCE_END_RE.finditer(normalized):
+        punct = match.group(0).strip()
+        end_pos = match.end()
+
+        if punct == ".":
+            prefix = normalized[start : match.start() + 1]
+            last_token = prefix.rsplit(" ", 1)[-1].lstrip("\"'([")
+            bare_token = last_token.rstrip(".").lower()
+            if _DOTTED_INITIAL_RE.match(last_token) or bare_token in _ABBREVIATIONS:
+                continue
+
+        chunk = normalized[start:end_pos].strip()
+        if chunk:
+            sentences.append(chunk)
+        start = end_pos
+
+    tail = normalized[start:].strip()
+    if tail:
+        sentences.append(tail)
+    return sentences
+
+
+def fits_hook_length(
+    text: str,
+    max_words: int = HOOK_MAX_WORDS,
+    max_chars: int = HOOK_MAX_CHARS,
+) -> bool:
+    """Return True if text fits within the configured hook word and character limits."""
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if not normalized:
+        return True
+    return len(normalized.split()) <= max_words and len(normalized) <= max_chars
+
+
+def fit_hook_text_to_limits(
+    text: str,
+    max_words: int = HOOK_MAX_WORDS,
+    max_chars: int = HOOK_MAX_CHARS,
+) -> str:
+    """
+    Check if hook text fits within the hook length definitions.
+    If not, reduce the number of sentences from the end until the remaining
+    complete sentence(s) fit while still making grammatical sense.
+    """
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if not normalized or fits_hook_length(normalized, max_words=max_words, max_chars=max_chars):
+        return normalized
+
+    sentences = split_sentences(normalized)
+    while len(sentences) > 1 and not fits_hook_length(
+        " ".join(sentences), max_words=max_words, max_chars=max_chars
+    ):
+        sentences.pop()
+
+    return " ".join(sentences).strip()
+
+
+def _is_truncated_fact(fact: str) -> bool:
+    s = (fact or "").strip()
+    return s.endswith("…") or s.endswith("...")
 
 
 def _clean_teaser(fact: str) -> str:
-    """Clean a fact for natural spoken TTS delivery without ever chopping mid-sentence."""
+    """Clean a complete fact for natural spoken TTS delivery without ever chopping mid-sentence."""
     text = re.sub(r"\s+", " ", (fact or "")).strip()
-    if not text:
+    if not text or _is_truncated_fact(text):
         return ""
-    # If the source fact was truncated with an ellipsis, strip dangling stopwords at the end
-    was_truncated = text.endswith("…") or text.endswith("...")
-    text = text.replace("—", ", ").replace("–", ", ").replace("…", "").rstrip(".")
+    text = text.replace("—", ", ").replace("–", ", ")
     text = re.sub(r"#(\d+)", r"number \1", text)
     text = text.replace("&", "and")
 
     # Keep the first complete sentence if multiple sentences were concatenated
-    parts = re.split(r"(?<=[.!?])\s+", text)
+    parts = split_sentences(text)
+    if not parts:
+        return ""
     text = parts[0].strip()
-
-    if was_truncated:
-        words = text.split()
-        while len(words) > 4 and words[-1].lower().strip(",;:-'\"") in _TRAILING_STOPWORDS:
-            words.pop()
-        text = " ".join(words).rstrip(",;:-")
 
     if text and not text.endswith((".", "!", "?")):
         text += "!"
     return text
 
 
-def _pick_best_hook_fact(facts: Optional[List[str]]) -> str:
-    """Choose the punchiest complete fact (preferring non-truncated trivia)."""
+def _candidate_hook_facts(facts: Optional[List[str]]) -> List[str]:
+    """Return all cleaned, complete (non-truncated) facts in priority order."""
     if not facts:
+        return []
+    candidates: List[str] = []
+    for f in facts:
+        if not isinstance(f, str):
+            continue
+        cleaned = _clean_teaser(f)
+        if cleaned and cleaned not in candidates:
+            candidates.append(cleaned)
+    return candidates
+
+
+def _pick_best_hook_fact(facts: Optional[List[str]]) -> str:
+    """Choose the punchiest complete fact (never using ellipsis-truncated snippets)."""
+    candidates = _candidate_hook_facts(facts)
+    if not candidates:
         return ""
-    clean = [f.strip() for f in facts if isinstance(f, str) and f.strip()]
-    if not clean:
-        return ""
-    # Prefer complete (non-ellipsis) facts so we never read a cut-off Wikipedia snippet
-    complete = [f for f in clean if not f.endswith("…") and not f.endswith("...")]
-    pool = complete or clean
-    best = pool[0]
-    if len(best.split()) > 26:
-        shorter = [f for f in pool if len(f.split()) <= 24]
+    best = candidates[0]
+    if len(best.split()) > HOOK_MAX_WORDS:
+        shorter = [f for f in candidates if len(f.split()) <= HOOK_MAX_WORDS - 2]
         if shorter:
             best = shorter[0]
-    return _clean_teaser(best)
+    return best
 
 
 def get_era_bucket(year: Optional[int]) -> str:
@@ -265,9 +349,14 @@ def build_dj_hook_script(
     recent_hook_ids: Optional[List[str]] = None,
     custom_text: Optional[str] = None,
     rng: Optional[random.Random] = None,
+    max_words: int = HOOK_MAX_WORDS,
+    max_chars: int = HOOK_MAX_CHARS,
 ) -> Dict[str, str]:
     """
     Build a bright, upbeat 5-8s era-specific GenX DJ spoken hook.
+    Checks that the rendered script fits within the hook length definitions
+    (max_words / max_chars); if not, tries a shorter complete fact or reduces
+    the number of sentences so the hook fits while remaining grammatical.
     Returns dict: {"hook_id": str, "era": str, "text": str}.
     """
     year = track.get("year")
@@ -277,7 +366,9 @@ def build_dj_hook_script(
         return {
             "hook_id": "custom",
             "era": era,
-            "text": re.sub(r"\s+", " ", custom_text.strip()),
+            "text": fit_hook_text_to_limits(
+                custom_text, max_words=max_words, max_chars=max_chars
+            ),
         }
 
     recent_set = set(recent_hook_ids or [])
@@ -304,16 +395,50 @@ def build_dj_hook_script(
     title = str(track.get("title", "Unknown Track")).strip()
     year_str = str(year) if year else "the Gen X era"
     peak_phrase = _format_peak_phrase(track)
-    fact_teaser = _pick_best_hook_fact(facts)
+    candidate_facts = _candidate_hook_facts(facts)
 
-    rendered = chosen["template"].format(
-        artist=artist,
-        title=title,
-        year=year_str,
-        peak_phrase=peak_phrase,
-        fact=fact_teaser,
-    )
-    rendered = re.sub(r"\s+", " ", rendered).strip()
+    def _render(tmpl: Dict[str, str], fact_text: str) -> str:
+        raw = tmpl["template"].format(
+            artist=artist,
+            title=title,
+            year=year_str,
+            peak_phrase=peak_phrase,
+            fact=fact_text,
+        )
+        return re.sub(r"\s+", " ", raw).strip()
+
+    # Try each complete fact in priority order to see if template + fact fits limits
+    rendered: Optional[str] = None
+    for fact_teaser in candidate_facts:
+        candidate = _render(chosen, fact_teaser)
+        if fits_hook_length(candidate, max_words=max_words, max_chars=max_chars):
+            rendered = candidate
+            break
+
+    if rendered is None:
+        # No fact fit with this template (or no complete facts available).
+        # Avoid templates whose opener doesn't stand cleanly without a fact.
+        if chosen["id"] in _FACT_REQUIRED_TEMPLATE_IDS:
+            standalone_pool = [
+                t for t in fresh if t["id"] not in _FACT_REQUIRED_TEMPLATE_IDS
+            ] or [
+                t for t in combined if t["id"] not in _FACT_REQUIRED_TEMPLATE_IDS
+            ]
+            chosen = r.choice(standalone_pool)
+            for fact_teaser in candidate_facts:
+                candidate = _render(chosen, fact_teaser)
+                if fits_hook_length(candidate, max_words=max_words, max_chars=max_chars):
+                    rendered = candidate
+                    break
+
+    if rendered is None:
+        # Render without fact (or with first fact if single-sentence reduction needed)
+        # and reduce whole sentences until it fits within the hook length definitions.
+        base = _render(chosen, "")
+        rendered = fit_hook_text_to_limits(
+            base, max_words=max_words, max_chars=max_chars
+        )
+
     return {
         "hook_id": chosen["id"],
         "era": chosen["era"],

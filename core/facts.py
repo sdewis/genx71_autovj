@@ -535,16 +535,23 @@ def fetch_wikipedia_facts(artist: str, title: str, timeout: int = 8) -> List[str
         if not extract:
             return []
 
-        # Split into sentences and keep informative ones
-        raw_sentences = re.split(r"(?<=[.!?])\s+", extract.strip())
-        facts: List[str] = []
+        # Split into complete sentences (abbreviation-aware) and prefer non-truncated ones
+        from core.hooks import split_sentences
+
+        raw_sentences = split_sentences(extract.strip())
+        complete_facts: List[str] = []
+        truncated_facts: List[str] = []
         for s in raw_sentences:
             cleaned = _clean_sentence(s)
-            if len(cleaned) >= 28:
-                facts.append(cleaned)
-            if len(facts) == 3:
+            if len(cleaned) < 28:
+                continue
+            if cleaned.endswith("…") or cleaned.endswith("..."):
+                truncated_facts.append(cleaned)
+            else:
+                complete_facts.append(cleaned)
+            if len(complete_facts) >= 3:
                 break
-        return facts
+        return (complete_facts + truncated_facts)[:3]
     except Exception as e:
         logger.warning(f"Wikipedia fact lookup failed for {artist} - {title}: {e}")
         return []

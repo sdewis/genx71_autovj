@@ -140,15 +140,24 @@ def test_radio_ramp_mix_backs_up_start_and_targets_near_59s():
 
 
 def test_long_dj_intro_expands_video_beyond_60s_and_never_chops_sentences():
-    # 1. Verify long facts are NOT chopped mid-sentence (e.g. ending in "and the!")
+    from core.hooks import fits_hook_length
+
+    # 1. Verify long facts are NEVER chopped mid-sentence (e.g. ending in "and the!"):
+    #    - Under default hook length definitions, oversized multi-sentence hooks drop whole sentences to fit.
+    #    - When limits allow, the full sentence is preserved intact.
     track = {"artist": "Donna Summer", "title": "I Feel Love", "year": 1977, "chart_peak": 1, "chart_region": "UK"}
     long_fact = (
         "Produced by Giorgio Moroder and Pete Bellotte using a Moog modular synthesizer "
         "and the pioneering electronic disco rhythm changed dance music forever."
     )
-    hook = build_dj_hook_script(track, facts=[long_fact], rng=random.Random(7))
-    assert "changed dance music forever" in hook["text"]
-    assert not hook["text"].lower().endswith("and the!")
+    hook_fit = build_dj_hook_script(track, facts=[long_fact], rng=random.Random(7))
+    assert fits_hook_length(hook_fit["text"])
+    assert not hook_fit["text"].lower().endswith("and the!")
+    assert hook_fit["text"].endswith((".", "!", "?"))
+
+    hook_wide = build_dj_hook_script(track, facts=[long_fact], rng=random.Random(7), max_words=40, max_chars=240)
+    assert "changed dance music forever" in hook_wide["text"]
+    assert not hook_wide["text"].lower().endswith("and the!")
 
     # 2. Verify a 15s DJ intro expands total video duration beyond 60s (~65s) with fade-up after 15.15s
     with tempfile.TemporaryDirectory() as tmp:
