@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from core.db import (
     init_db, count_tracks, get_available_tracks, get_recent_posts,
-    get_all_tracks, add_track, add_to_blacklist, remove_from_blacklist,
+    get_all_tracks, get_track_by_id, add_track, add_to_blacklist, remove_from_blacklist,
     get_blacklist, get_all_settings, set_setting, get_setting, get_post_by_id,
     update_post_status, update_post_fields, is_track_posted, is_blacklisted,
     queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue,
@@ -238,6 +238,43 @@ def api_styles():
     return {"styles": get_style_metadata()}
 
 
+def _start_generation_worker(
+    *,
+    track_id: Optional[int],
+    template: Optional[str],
+    era_appropriate: Optional[bool],
+    force_wildcard: Optional[bool],
+    publish: bool,
+    auto_queue: Optional[bool],
+) -> None:
+    def _worker():
+        def _cb(msg: str, pct: int):
+            gen_state["message"] = msg
+            gen_state["progress"] = pct
+
+        try:
+            post = generate_post_video(
+                track_id=track_id,
+                template=template,
+                era_appropriate=era_appropriate,
+                force_wildcard=force_wildcard,
+                publish=publish,
+                auto_queue=auto_queue,
+                tts_enabled=False,
+                progress_cb=_cb
+            )
+            gen_state["last_post"] = post
+            gen_state["progress"] = 100
+        except Exception as e:
+            logger.exception("Generation worker error")
+            gen_state["error"] = str(e)
+            gen_state["message"] = f"Error: {e}"
+        finally:
+            gen_state["running"] = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 @app.post("/api/generate")
 def api_generate(req: GenerateRequest):
     use_tts = (
@@ -278,32 +315,14 @@ def api_generate(req: GenerateRequest):
         gen_state["error"] = None
         gen_state["last_post"] = None
 
-    def _worker():
-        def _cb(msg: str, pct: int):
-            gen_state["message"] = msg
-            gen_state["progress"] = pct
-
-        try:
-            post = generate_post_video(
-                track_id=req.track_id,
-                template=req.template,
-                era_appropriate=req.era_appropriate,
-                force_wildcard=req.force_wildcard,
-                publish=req.publish,
-                auto_queue=req.auto_queue,
-                tts_enabled=False,
-                progress_cb=_cb
-            )
-            gen_state["last_post"] = post
-            gen_state["progress"] = 100
-        except Exception as e:
-            logger.exception("Generation worker error")
-            gen_state["error"] = str(e)
-            gen_state["message"] = f"Error: {e}"
-        finally:
-            gen_state["running"] = False
-
-    threading.Thread(target=_worker, daemon=True).start()
+    _start_generation_worker(
+        track_id=req.track_id,
+        template=req.template,
+        era_appropriate=req.era_appropriate,
+        force_wildcard=req.force_wildcard,
+        publish=req.publish,
+        auto_queue=req.auto_queue,
+    )
     return {"started": True, "queued_tts": False}
 
 
@@ -369,6 +388,122 @@ def api_delete_post(post_id: int):
         "file_removed": video_removed,
         "tts_removed": tts_removed,
         "track_unlocked": True,
+    }
+
+
+@app.post("/api/posts/{post_id}/rerender")
+def api_rerender_post(post_id: int, req: Optional[GenerateRequest] = None):
+    """
+    Atomically delete an existing render from History (removing its MP4 and cached
+    TTS audio) and immediately start a fresh render for the same track using the
+    requested/current Studio settings.
+    """
+    req = req or GenerateRequest()
+
+    post = get_post_by_id(post_id)
+    if not post:
+        raise HTTPException(status_code=404, detail="Post not found.")
+    if post.get("status") == "rendering":
+        raise HTTPException(status_code=409, detail="Cannot re-render a post while it is actively rendering.")
+    if publish_state["running"] and publish_state["post_id"] == post_id:
+        raise HTTPException(status_code=409, detail="Cannot re-render a post while it is uploading to TikTok.")
+
+    track_id = post.get("track_id")
+    if not track_id or not get_track_by_id(track_id):
+        track_id = add_track(
+            artist=post["artist"],
+            title=post["title"],
+            year=post["year"],
+        )
+    if not track_id:
+        raise HTTPException(status_code=404, detail="Associated track not found in catalog.")
+
+    use_tts = (
+        bool(req.tts_enabled)
+        if req.tts_enabled is not None
+        else get_setting("tts_enabled", "false") == "true"
+    )
+
+    if use_tts:
+        if not resolve_voice_region(requested_region=req.voice_region):
+            raise HTTPException(
+                status_code=400,
+                detail="Voice Hook TTS is enabled, but no UK or US voice clip has been uploaded yet. Upload a sample in Admin first.",
+            )
+
+        deleted = delete_post(post_id)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Post not found.")
+
+        video_removed = _safe_remove_file_under(deleted.get("video_path"), OUTPUT_DIR)
+        tts_removed = _safe_remove_file_under(deleted.get("tts_audio_path"), TTS_CACHE_DIR)
+        if gen_state.get("last_post") and gen_state["last_post"].get("id") == post_id:
+            gen_state["last_post"] = None
+
+        try:
+            pending_post = enqueue_tts_post(
+                track_id=track_id,
+                template=req.template,
+                era_appropriate=req.era_appropriate,
+                force_wildcard=False,
+                publish=req.publish,
+                auto_queue=req.auto_queue,
+                voice_region=req.voice_region,
+                custom_hook_text=req.custom_hook_text,
+            )
+            tts_worker.start()
+            tts_worker.wake()
+            return {
+                "started": True,
+                "queued_tts": True,
+                "deleted_id": post_id,
+                "track_id": track_id,
+                "file_removed": video_removed,
+                "tts_removed": tts_removed,
+                "post": pending_post,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    with gen_lock:
+        if gen_state["running"]:
+            raise HTTPException(status_code=409, detail="A generation job is already running.")
+        gen_state["running"] = True
+        gen_state["progress"] = 5
+        gen_state["message"] = "Starting re-render pipeline..."
+        gen_state["error"] = None
+        gen_state["last_post"] = None
+
+    try:
+        deleted = delete_post(post_id)
+        if not deleted:
+            gen_state["running"] = False
+            raise HTTPException(status_code=404, detail="Post not found.")
+
+        video_removed = _safe_remove_file_under(deleted.get("video_path"), OUTPUT_DIR)
+        tts_removed = _safe_remove_file_under(deleted.get("tts_audio_path"), TTS_CACHE_DIR)
+
+        _start_generation_worker(
+            track_id=track_id,
+            template=req.template,
+            era_appropriate=req.era_appropriate,
+            force_wildcard=False,
+            publish=req.publish,
+            auto_queue=req.auto_queue,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        gen_state["running"] = False
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    return {
+        "started": True,
+        "queued_tts": False,
+        "deleted_id": post_id,
+        "track_id": track_id,
+        "file_removed": video_removed,
+        "tts_removed": tts_removed,
     }
 
 

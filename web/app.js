@@ -114,17 +114,14 @@ async function refreshStatus() {
   }
 }
 
-async function triggerGeneration(opts = {}) {
-  if (settingsReady) {
-    await settingsReady.catch(() => {});
-  }
+function buildGenerationPayload(opts = {}) {
   const eraAppropriate = document.getElementById("gen-era-appropriate").checked;
   const autoQueue = document.getElementById("gen-auto-queue").checked;
   const ttsEnabled = Boolean(document.getElementById("gen-tts-enabled")?.checked);
   const voiceRegion = document.getElementById("gen-voice-region")?.value || null;
   const customHookText = (document.getElementById("gen-custom-hook")?.value || "").trim() || null;
   const template = document.getElementById("gen-template").value;
-  const payload = {
+  return {
     template: eraAppropriate ? null : template,
     era_appropriate: eraAppropriate,
     auto_queue: autoQueue,
@@ -133,6 +130,13 @@ async function triggerGeneration(opts = {}) {
     custom_hook_text: ttsEnabled ? customHookText : null,
     ...opts
   };
+}
+
+async function triggerGeneration(opts = {}) {
+  if (settingsReady) {
+    await settingsReady.catch(() => {});
+  }
+  const payload = buildGenerationPayload(opts);
 
   const res = await fetch("/api/generate", {
     method: "POST",
@@ -618,11 +622,15 @@ async function loadPosts() {
     const deleteBtn = status !== "rendering"
       ? `<button class="btn-small btn-danger-outline" title="Delete render and unlock track for re-rendering" onclick="deletePostRender(${p.id}, '${safeArtist}', '${safeTitle}')">🗑️ Delete</button>`
       : "";
+    const rerenderBtn = (status !== "rendering" && status !== "tts_pending")
+      ? `<button class="btn-small" title="Delete this render and re-render the track immediately using current Studio settings" onclick="rerenderPost(${p.id}, '${safeArtist}', '${safeTitle}')">🔁 Re-render</button>`
+      : "";
 
     if (status === "tts_failed") {
       actionsHtml = `
         <button class="btn-small" onclick="retryPostTTS(${p.id})">🔄 Retry TTS</button>
         <button class="btn-small" onclick="renderPostWithoutTTS(${p.id})">🎬 No TTS</button>
+        ${rerenderBtn}
         ${deleteBtn}
       `;
     } else if (status === "tts_pending" || status === "rendering") {
@@ -638,6 +646,7 @@ async function loadPosts() {
         ${p.video_url ? `<button class="btn-small" onclick="previewFromList('${p.video_url}', '${safeArtist}', '${safeTitle}', '${safeBadge}', ${p.id})">▶️</button>` : ""}
         ${p.video_url ? queueBtn : ""}
         ${p.video_url ? `<button class="btn-small btn-publish-post" ${publishPollTimer ? "disabled" : ""} onclick="publishPost(${p.id})">🚀 Post</button>` : ""}
+        ${rerenderBtn}
         ${deleteBtn}
       `;
     }
@@ -699,6 +708,66 @@ window.deletePostRender = async (postId, artist, title) => {
     if (typeof loadTracks === "function") loadTracks();
   } catch (err) {
     alert("Delete Error: " + (err.message || err));
+  }
+};
+
+window.rerenderPost = async (postId, artist, title) => {
+  const label = `${artist || "Track"} — ${title || ""}`.trim();
+  if (!confirm(`Re-render "${label}"?\n\nThis will replace the existing render and immediately start a fresh render using your current Studio settings.`)) {
+    return;
+  }
+  try {
+    if (settingsReady) {
+      await settingsReady.catch(() => {});
+    }
+    const payload = buildGenerationPayload();
+    const res = await fetch(`/api/posts/${postId}/rerender`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      alert("Re-render Error: " + (data.detail || `HTTP ${res.status}`));
+      return;
+    }
+
+    if (currentPreviewPostId === postId) {
+      currentPreviewPostId = null;
+      const card = document.getElementById("preview-card");
+      const vid = document.getElementById("preview-video");
+      if (vid) {
+        vid.pause();
+        vid.removeAttribute("src");
+        vid.load();
+      }
+      if (card) card.classList.add("hidden");
+    }
+
+    if (data.queued_tts && data.post) {
+      const customInput = document.getElementById("gen-custom-hook");
+      if (customInput) customInput.value = "";
+      const box = document.getElementById("gen-progress-box");
+      const fill = document.getElementById("gen-progress-fill");
+      const msg = document.getElementById("gen-progress-msg");
+      if (box && fill && msg) {
+        box.classList.remove("hidden");
+        fill.style.width = "15%";
+        msg.textContent = `🎙️ Re-rendering "${data.post.artist} — ${data.post.title}" as TTS pending (${(data.post.voice_region || "uk").toUpperCase()} voice). Track progress in History.`;
+      }
+      loadPosts();
+      loadQueue();
+      refreshStatus();
+      if (typeof loadTracks === "function") loadTracks();
+      return;
+    }
+
+    document.querySelector('[data-tab="studio"]').click();
+    startProgressPolling();
+    loadQueue();
+    refreshStatus();
+  } catch (err) {
+    alert("Re-render Error: " + (err.message || err));
   }
 };
 
