@@ -539,6 +539,8 @@ def prepare_track_audio(
         ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
     tts_duration = 0.0
+    ramp_start = 0.0
+    ramp_end = 0.0
     if has_tts:
         # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp.
         # Allow total video length to expand dynamically beyond 60s if the DJ intro is long.
@@ -558,6 +560,8 @@ def prepare_track_audio(
             main_music_duration=main_target,
         )
         tts_duration = mix_info["tts_duration"]
+        ramp_start = mix_info["ramp_start"]
+        ramp_end = mix_info["ramp_end"]
     else:
         start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=TARGET_CLIP_DURATION)
         raw_clip_dur = max(1.0, min(MAX_CLIP_DURATION, end_sec - start_sec))
@@ -604,5 +608,7 @@ def prepare_track_audio(
         "rms_envelope": features["rms"],
         "audio_features": features,
         "tts_duration": tts_duration,
+        "ramp_start": ramp_start,
+        "ramp_end": ramp_end,
     }
 

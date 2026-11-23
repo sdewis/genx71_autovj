@@ -313,8 +313,13 @@ def process_pending_post(
     _prog("Sourcing & mixing audio track...", 50)
     try:
         audio_info = prepare_track_audio(artist, title, tts_audio_path=tts_audio_path)
-        if hook_overlay and audio_info.get("tts_duration"):
-            hook_overlay["duration"] = float(audio_info["tts_duration"])
+        if hook_overlay:
+            if audio_info.get("tts_duration"):
+                hook_overlay["duration"] = float(audio_info["tts_duration"])
+            if audio_info.get("ramp_start"):
+                hook_overlay["ramp_start"] = float(audio_info["ramp_start"])
+            if audio_info.get("ramp_end"):
+                hook_overlay["ramp_end"] = float(audio_info["ramp_end"])
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         out_filename = f"{timestamp}_{_safe_filename(artist)}_{_safe_filename(title)}_{chosen_template}.mp4"

@@ -227,9 +227,12 @@ def test_api_delete_post_removes_file_and_blocks_rendering():
 
 def test_vinyl_tonearm_home_cue_and_tracking():
     """
-    Verify the vinyl turntable tonearm starts in its home position outside the
-    disc, auto-lifts and cues to 24% during the hook, and progressively tracks
-    to 80% as the main audio ends (both with and without a DJ hook).
+    Verify the 5-phase vinyl turntable tonearm choreography:
+      1) Starts at home position outside the disc (t = 0)
+      2) Immediately lifts and swings across the hook toward 23% into the grooves
+      3) Arrives at 23% and drops onto the vinyl right as the main audio crossfades
+      4) Tracks smoothly from 23% to 80% over the main audio duration
+      5) Lifts and swings back to the home cradle over the final 1.5s
     """
     from playwright.sync_api import sync_playwright
     from core.browser_renderer import STUDIO_HTML_PATH, _launch_chromium
@@ -238,10 +241,10 @@ def test_vinyl_tonearm_home_cue_and_tracking():
     base_payload = {
         "style": "hifi",
         "media_variant": "vinyl",
-        "artist": "The Human League",
-        "title": "Don't You Want Me",
-        "year": 1981,
-        "chart_badge": "UK #1 • 1981",
+        "artist": "Tears For Fears",
+        "title": "Mad World",
+        "year": 1982,
+        "chart_badge": "UK #3 • 1982",
         "duration": 50.0,
         "palette": {
             "primary": [195, 45, 78],
@@ -268,55 +271,86 @@ def test_vinyl_tonearm_home_cue_and_tracking():
             page = browser.new_page(viewport={"width": 1080, "height": 1920})
             page.goto(template_url)
 
-            # 1. With a 6.0s spoken DJ hook
+            # 1. With a 7.0s spoken DJ hook & explicit audio crossfade (7.15s -> 7.60s)
             payload_hook = dict(base_payload, hook={
-                "text": "Pure 1981 vinyl magic right here!",
-                "duration": 6.0,
-                "voice_rms": [0.5] * 180,
+                "text": "Tears For Fears changed 1982 with Mad World!",
+                "duration": 7.0,
+                "ramp_start": 7.15,
+                "ramp_end": 7.60,
+                "voice_rms": [0.5] * 210,
                 "region": "uk",
             })
             page.evaluate("async (pl) => await window.initScene(pl)", payload_hook)
 
-            s_home = page.evaluate("window.computeVinylTonearmState(1.0)")
+            # Starts at home at t = 0
+            s_home = page.evaluate("window.computeVinylTonearmState(0.0)")
             assert s_home["phase"] == "home"
             assert s_home["lift"] == 0
-            assert s_home["radiusFromCenter"] > 261.2  # parked outside vinyl rim
+            assert s_home["radiusFromCenter"] > 261.2
 
-            s_cue = page.evaluate("window.computeVinylTonearmState(4.2)")
-            assert s_cue["phase"] == "cue"
-            assert s_cue["lift"] > 0.9
+            # Already swinging & lifted during the hook (at t = 1.5s and t = 4.0s)
+            s_early = page.evaluate("window.computeVinylTonearmState(1.5)")
+            assert s_early["phase"] == "cue"
+            assert s_early["lift"] == 1.0
+            assert s_early["radiusFromCenter"] < s_home["radiusFromCenter"]
 
-            s_start = page.evaluate("window.computeVinylTonearmState(6.15)")
+            s_mid_hook = page.evaluate("window.computeVinylTonearmState(4.0)")
+            assert s_mid_hook["phase"] == "cue"
+            assert s_mid_hook["lift"] == 1.0
+            assert s_mid_hook["radiusFromCenter"] < s_early["radiusFromCenter"]
+
+            # Reaches 23% right as the audio crossfade starts (7.15s) and seats by 7.60s
+            s_xfade_start = page.evaluate("window.computeVinylTonearmState(7.15)")
+            assert s_xfade_start["phase"] == "drop"
+            assert abs(s_xfade_start["recordPct"] - 0.23) < 0.005
+
+            s_start = page.evaluate("window.computeVinylTonearmState(7.60)")
             assert s_start["phase"] == "play"
             assert s_start["lift"] == 0
-            assert abs(s_start["recordPct"] - 0.24) < 0.005
+            assert abs(s_start["recordPct"] - 0.23) < 0.005
 
+            # Mid-playback tracks smoothly inward
             s_mid = page.evaluate("window.computeVinylTonearmState(28.0)")
             assert s_mid["phase"] == "play"
             assert 0.45 < s_mid["recordPct"] < 0.60
             assert s_mid["radiusFromCenter"] < s_start["radiusFromCenter"]
 
-            s_end = page.evaluate("window.computeVinylTonearmState(49.35)")
+            # Reaches 80% right as main audio finishes (48.5s = 50.0 - 1.5s)
+            s_end = page.evaluate("window.computeVinylTonearmState(48.49)")
             assert s_end["phase"] == "play"
             assert s_end["lift"] == 0
             assert abs(s_end["recordPct"] - 0.80) < 0.005
-            assert s_end["radiusFromCenter"] < s_mid["radiusFromCenter"]
 
-            # 2. Without a DJ hook (still starts at home, auto-cues to 24%, ends at 80%)
+            # Over the final 1.5s (48.5s -> 50.0s), lifts and returns to home cradle
+            s_ret = page.evaluate("window.computeVinylTonearmState(49.25)")
+            assert s_ret["phase"] == "return"
+            assert s_ret["lift"] > 0.9
+            assert s_ret["radiusFromCenter"] > s_end["radiusFromCenter"]
+
+            s_done = page.evaluate("window.computeVinylTonearmState(50.0)")
+            assert s_done["phase"] == "home"
+            assert s_done["lift"] == 0
+            assert s_done["radiusFromCenter"] > 261.2
+
+            # 2. Without a DJ hook (still starts at home, cues to 23%, ends at 80%, returns home)
             payload_no_hook = dict(base_payload, hook=None)
             page.evaluate("async (pl) => await window.initScene(pl)", payload_no_hook)
 
-            nh_home = page.evaluate("window.computeVinylTonearmState(0.2)")
+            nh_home = page.evaluate("window.computeVinylTonearmState(0.0)")
             assert nh_home["phase"] == "home"
             assert nh_home["radiusFromCenter"] > 261.2
 
-            nh_start = page.evaluate("window.computeVinylTonearmState(2.5)")
+            nh_start = page.evaluate("window.computeVinylTonearmState(2.2)")
             assert nh_start["phase"] == "play"
-            assert abs(nh_start["recordPct"] - 0.24) < 0.005
+            assert abs(nh_start["recordPct"] - 0.23) < 0.005
 
-            nh_end = page.evaluate("window.computeVinylTonearmState(49.35)")
+            nh_end = page.evaluate("window.computeVinylTonearmState(48.49)")
             assert nh_end["phase"] == "play"
             assert abs(nh_end["recordPct"] - 0.80) < 0.005
+
+            nh_done = page.evaluate("window.computeVinylTonearmState(50.0)")
+            assert nh_done["phase"] == "home"
+            assert nh_done["radiusFromCenter"] > 261.2
         finally:
             browser.close()
 

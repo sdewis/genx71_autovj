@@ -371,10 +371,11 @@
     discCx: 665,
     discCy: 615,
     discOuterR: 261.2,
-    grooveOuterR: 248.0, // 0% into playable grooves (lead-in)
-    grooveInnerR: 112.0, // 100% into playable grooves (just outside label)
-    startPct: 0.24,      // 24% into record when main audio begins
-    endPct: 0.80,        // 80% into record as main audio ends
+    grooveOuterR: 250.0, // 0% into playable black vinyl grooves (lead-in)
+    grooveInnerR: 110.0, // 100% into playable black vinyl grooves (just outside label)
+    startPct: 0.23,      // 23% into the music band when main audio crossfades in
+    endPct: 0.80,        // 80% into the music band as main audio finishes
+    returnDur: 1.5,      // 1.5s auto-lift and return swing back to home cradle
     homeOffsetR: 46.0,   // parked cleanly outside vinyl outer rim
     pivotX: 934,
     pivotY: 372,
@@ -402,10 +403,9 @@
 
   function computeVinylTonearmState(t) {
     const cfg = VINYL_TONEARM;
-    const dur = Math.max(1.0, Number(SCENE && SCENE.duration) || 30.0);
-    const hookDur = (SCENE && SCENE.hook && Number(SCENE.hook.duration) > 0.2)
-      ? Number(SCENE.hook.duration)
-      : 0;
+    const dur = Math.max(2.0, Number(SCENE && SCENE.duration) || 30.0);
+    const hook = SCENE && SCENE.hook;
+    const hookDur = (hook && Number(hook.duration) > 0.2) ? Number(hook.duration) : 0;
     const hasHook = hookDur > 0;
 
     const rHome = cfg.discOuterR + cfg.homeOffsetR;
@@ -416,65 +416,114 @@
     const endAngle = tonearmAngleForRadius(rEnd);
 
     // Phase timing:
-    // - With a spoken DJ hook: stay parked at home briefly while the disc slides out,
-    //   then auto-lift, cue over to the 24% groove, and drop onto the vinyl right as
-    //   the hook finishes and the main audio ramps up.
-    // - Without a hook: auto-lift and cue from home to 24% during the opening ~2.4s.
-    let dropEnd, restEnd, liftDur, dropDur;
+    // 1) Starts at home (t = 0).
+    // 2) As soon as the hook starts, lifts and swings continuously across the hook
+    //    so it arrives at 23% right as the main audio crossfades in (ramp_start -> ramp_end).
+    // 3) Tracks smoothly from 23% -> 80% over the main audio duration.
+    // 4) Over the final 1.5s, lifts off the 80% groove and swings back to the home cradle.
+    let liftStart, liftEnd, swingStart, swingEnd, dropStart, dropEnd;
     if (hasHook) {
-      dropEnd = Math.min(hookDur + 0.15, Math.max(1.5, dur * 0.45));
-      const cueSpan = clamp(dropEnd - 1.15, Math.min(1.1, dropEnd * 0.72), 4.0);
-      restEnd = Math.max(0.25, dropEnd - cueSpan);
-      liftDur = clamp(cueSpan * 0.20, 0.22, 0.60);
-      dropDur = clamp(cueSpan * 0.22, 0.22, 0.65);
+      const rampStart = (hook.ramp_start && Number(hook.ramp_start) > 0.2)
+        ? Number(hook.ramp_start)
+        : hookDur + 0.15;
+      const rampEnd = (hook.ramp_end && Number(hook.ramp_end) > rampStart)
+        ? Number(hook.ramp_end)
+        : rampStart + 0.45;
+
+      const maxCueEnd = Math.max(1.2, dur - cfg.returnDur - 1.0);
+      dropEnd = Math.min(rampEnd, maxCueEnd);
+      dropStart = Math.min(rampStart, Math.max(0.6, dropEnd - 0.35));
+      liftStart = 0.05;
+      const liftDur = clamp(dropStart * 0.14, 0.22, 0.45);
+      liftEnd = liftStart + liftDur;
+      // Begin swinging immediately as the hook starts (right as lift engages)
+      swingStart = liftStart + liftDur * 0.35;
+      swingEnd = Math.max(swingStart + 0.25, dropStart);
     } else {
-      dropEnd = Math.min(2.5, dur * 0.22);
-      restEnd = dropEnd * 0.30;
-      const cueSpan = dropEnd - restEnd;
-      liftDur = cueSpan * 0.22;
-      dropDur = cueSpan * 0.22;
+      dropEnd = Math.min(2.2, dur * 0.20);
+      dropStart = dropEnd - 0.35;
+      liftStart = 0.05;
+      liftEnd = 0.40;
+      swingStart = 0.20;
+      swingEnd = Math.max(swingStart + 0.25, dropStart);
     }
 
-    const liftEnd = restEnd + liftDur;
-    const dropStart = dropEnd - dropDur;
-    const swingStart = restEnd + liftDur * 0.65;
-    const swingEnd = dropStart + dropDur * 0.20;
-    const mainEnd = Math.max(dropEnd + 0.5, dur - 0.65);
+    const returnDur = Math.min(cfg.returnDur, Math.max(0.5, (dur - dropEnd) * 0.35));
+    const mainEnd = Math.max(dropEnd + 0.5, dur - returnDur);
+    const returnStart = mainEnd;
+    const returnEnd = Math.min(dur, returnStart + returnDur);
+    const retLiftDur = returnDur * 0.24;     // ~0.36s lift off 80% groove
+    const retSwingStart = returnStart + retLiftDur * 0.55;
+    const retDropDur = returnDur * 0.22;     // ~0.33s lower into home cradle
+    const retDropStart = returnEnd - retDropDur;
+    const retSwingEnd = retDropStart + retDropDur * 0.15;
 
-    // Vertical lift height [0 = seated on cradle/record, 1 = lifted by cueing mechanism]
+    // Compute vertical lift [0 = seated, 1 = lifted] and angle across all 5 phases
     let lift = 0;
-    if (t <= restEnd) {
-      lift = 0;
-    } else if (t < liftEnd) {
-      lift = easeOutCubic((t - restEnd) / Math.max(0.01, liftDur));
-    } else if (t <= dropStart) {
-      lift = 1;
-    } else if (t < dropEnd) {
-      lift = 1 - smoothstep((t - dropStart) / Math.max(0.01, dropDur));
-    } else {
-      lift = 0;
-    }
-
-    let armAngle;
-    let phase;
+    let armAngle = homeAngle;
+    let phase = "home";
     let recordPct = null;
-    if (t <= swingStart) {
+
+    if (t <= liftStart) {
+      // 1. Home position at t = 0
+      lift = 0;
       armAngle = homeAngle;
-      phase = t <= restEnd ? "home" : "lift";
-    } else if (t < swingEnd) {
-      const u = easeInOutCubic((t - swingStart) / Math.max(0.01, swingEnd - swingStart));
-      armAngle = lerp(homeAngle, startAngle, u);
-      phase = "cue";
+      phase = "home";
     } else if (t < dropEnd) {
-      armAngle = startAngle;
-      phase = "drop";
-      recordPct = cfg.startPct;
-    } else {
+      // 2 & 3. Auto-lift, swing across the hook, and drop onto 23% at audio crossfade
+      if (t < liftEnd) {
+        lift = easeOutCubic((t - liftStart) / Math.max(0.01, liftEnd - liftStart));
+      } else if (t <= dropStart) {
+        lift = 1;
+      } else {
+        lift = 1 - smoothstep((t - dropStart) / Math.max(0.01, dropEnd - dropStart));
+      }
+
+      if (t <= swingStart) {
+        armAngle = homeAngle;
+        phase = "lift";
+      } else if (t < swingEnd) {
+        const u = easeInOutCubic((t - swingStart) / Math.max(0.01, swingEnd - swingStart));
+        armAngle = lerp(homeAngle, startAngle, u);
+        phase = "cue";
+      } else {
+        armAngle = startAngle;
+        phase = "drop";
+        recordPct = cfg.startPct;
+      }
+    } else if (t < returnStart) {
+      // 4. Main audio playback: progressive 23% -> 80% tracking
+      lift = 0;
       const p = clamp((t - dropEnd) / Math.max(0.1, mainEnd - dropEnd), 0, 1);
       recordPct = lerp(cfg.startPct, cfg.endPct, p);
       const r = lerp(rStart, rEnd, p);
       armAngle = tonearmAngleForRadius(r);
       phase = "play";
+    } else if (t < returnEnd) {
+      // 5. 1.5s auto-return: lift off 80% -> swing back to home -> lower into cradle
+      const rt = t - returnStart;
+      if (rt < retLiftDur) {
+        lift = easeOutCubic(rt / Math.max(0.01, retLiftDur));
+      } else if (t <= retDropStart) {
+        lift = 1;
+      } else {
+        lift = 1 - smoothstep((t - retDropStart) / Math.max(0.01, returnEnd - retDropStart));
+      }
+
+      if (t <= retSwingStart) {
+        armAngle = endAngle;
+        recordPct = cfg.endPct;
+      } else if (t < retSwingEnd) {
+        const u = easeInOutCubic((t - retSwingStart) / Math.max(0.01, retSwingEnd - retSwingStart));
+        armAngle = lerp(endAngle, homeAngle, u);
+      } else {
+        armAngle = homeAngle;
+      }
+      phase = "return";
+    } else {
+      lift = 0;
+      armAngle = homeAngle;
+      phase = "home";
     }
 
     const stylusX = cfg.pivotX + cfg.stylusLocalX * Math.cos(armAngle) - cfg.stylusLocalY * Math.sin(armAngle);
@@ -492,9 +541,11 @@
       stylusY,
       radiusFromCenter,
       recordPct,
-      restEnd,
+      dropStart,
       dropEnd,
       mainEnd,
+      returnStart,
+      returnEnd,
     };
   }
 
