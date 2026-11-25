@@ -9,12 +9,16 @@ import time
 import random
 import signal
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Optional
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.date import DateTrigger
 
-from core.db import init_db, get_setting, pop_next_queued_post, update_post_status
+from core.db import (
+    init_db, get_setting, set_setting, pop_next_queued_post,
+    update_post_status, claim_post_for_publish,
+)
 from core.charts import seed_charts_if_empty
 from core.pipeline import generate_post_video
 from core.tiktok_poster import check_cookie_health, upload_to_tiktok, build_caption
@@ -33,16 +37,27 @@ class AutoVJDaemon:
         self.running = False
         self.next_run_info = None
         self.next_analytics_run_info = None
+        self._job_lock = threading.Lock()
+        self._current_slot_base: Optional[datetime] = None
 
-    def _compute_next_jittered_run(self) -> Optional[datetime]:
+    def _compute_next_jittered_run(self, now: Optional[datetime] = None) -> Optional[datetime]:
         enabled = get_setting("schedule_enabled", "true", db_path=self.db_path) == "true"
         if not enabled:
+            self._current_slot_base = None
             return None
 
         raw_times = get_setting("daily_post_times", "12:30,19:15", db_path=self.db_path) or "12:30,19:15"
         jitter_mins = int(get_setting("jitter_minutes", "30", db_path=self.db_path) or "30")
 
-        now = datetime.now()
+        now = now or datetime.now()
+        last_slot_dt: Optional[datetime] = None
+        last_slot_raw = (get_setting("last_scheduled_slot", "", db_path=self.db_path) or "").strip()
+        if last_slot_raw:
+            try:
+                last_slot_dt = datetime.fromisoformat(last_slot_raw)
+            except ValueError:
+                last_slot_dt = None
+
         candidates = []
 
         for time_str in raw_times.split(","):
@@ -56,6 +71,10 @@ class AutoVJDaemon:
 
             for day_offset in (0, 1):
                 base_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0) + timedelta(days=day_offset)
+                # Never re-fire a time slot that was already executed (e.g. after a negative-jitter run)
+                if last_slot_dt is not None and base_dt <= last_slot_dt:
+                    continue
+
                 # Gaussian jitter clipped to [-jitter_mins, +jitter_mins]
                 if jitter_mins > 0:
                     offset = random.gauss(0, jitter_mins / 2.2)
@@ -65,9 +84,15 @@ class AutoVJDaemon:
                     jittered_dt = base_dt
 
                 if jittered_dt > now + timedelta(seconds=30):
-                    candidates.append(jittered_dt)
+                    candidates.append((jittered_dt, base_dt))
 
-        return min(candidates) if candidates else None
+        if not candidates:
+            self._current_slot_base = None
+            return None
+
+        chosen_jittered, chosen_base = min(candidates, key=lambda pair: pair[0])
+        self._current_slot_base = chosen_base
+        return chosen_jittered
 
     def _compute_next_analytics_run(self) -> Optional[datetime]:
         enabled = get_setting("analytics_report_enabled", "true", db_path=self.db_path) == "true"
@@ -141,7 +166,17 @@ class AutoVJDaemon:
             logger.info("Daily AI analytics reporting is disabled.")
 
     def _run_scheduled_job(self):
+        if not self._job_lock.acquire(blocking=False):
+            logger.warning("Scheduled post job already in progress; skipping overlapping trigger.")
+            return
+
         logger.info("Triggered scheduled GenX71 AutoVJ generation & post job.")
+        slot_base = self._current_slot_base or datetime.now()
+        try:
+            set_setting("last_scheduled_slot", slot_base.isoformat(), db_path=self.db_path)
+        except Exception as exc:
+            logger.warning("Could not persist last_scheduled_slot: %s", exc)
+
         try:
             queued = pop_next_queued_post(db_path=self.db_path)
             while queued and (not queued.get("video_path") or not os.path.exists(queued["video_path"])):
@@ -155,28 +190,36 @@ class AutoVJDaemon:
                 if not health["healthy"]:
                     logger.warning("Skipped queued post #%s: %s", queued["id"], health["reason"])
                 else:
-                    auto_pub = get_setting("auto_publish", "false", db_path=self.db_path) == "true"
-                    caption = build_caption(
-                        queued["artist"], queued["title"], queued["year"], queued.get("chart_info", "")
-                    )
-                    try:
-                        res = upload_to_tiktok(
-                            queued["video_path"], caption, auto_publish=auto_pub, db_path=self.db_path
+                    claimed = claim_post_for_publish(queued["id"], allow_republish=False, db_path=self.db_path)
+                    if not claimed:
+                        logger.warning(
+                            "Queued post #%s is already publishing or published; skipping duplicate upload.",
+                            queued["id"],
                         )
-                        update_post_status(queued["id"], res["status"], db_path=self.db_path)
-                        logger.info(
-                            "Scheduled queued post #%s finished: %s - %s (status=%s)",
-                            queued["id"], queued["artist"], queued["title"], res["status"]
+                    else:
+                        auto_pub = get_setting("auto_publish", "false", db_path=self.db_path) == "true"
+                        caption = build_caption(
+                            queued["artist"], queued["title"], queued["year"], queued.get("chart_info", "")
                         )
-                    except Exception as exc:
-                        logger.error("Scheduled queued post #%s upload failed: %s", queued["id"], exc)
-                        update_post_status(queued["id"], "failed", error_message=str(exc), db_path=self.db_path)
+                        try:
+                            res = upload_to_tiktok(
+                                queued["video_path"], caption, auto_publish=auto_pub, db_path=self.db_path
+                            )
+                            update_post_status(queued["id"], res["status"], db_path=self.db_path)
+                            logger.info(
+                                "Scheduled queued post #%s finished: %s - %s (status=%s)",
+                                queued["id"], queued["artist"], queued["title"], res["status"]
+                            )
+                        except Exception as exc:
+                            logger.error("Scheduled queued post #%s upload failed: %s", queued["id"], exc)
+                            update_post_status(queued["id"], "failed", error_message=str(exc), db_path=self.db_path)
             else:
                 post = generate_post_video(publish=True, db_path=self.db_path)
                 logger.info(f"Scheduled job finished: {post['artist']} - {post['title']} (status={post['status']})")
         except Exception as e:
             logger.error(f"Scheduled job failed: {e}")
         finally:
+            self._job_lock.release()
             self.reschedule_next()
 
     def reschedule_next(self):

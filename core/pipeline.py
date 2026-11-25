@@ -23,6 +23,7 @@ from core.db import (
     init_db, get_setting, record_post, update_post_status, update_post_fields,
     get_post_by_id, get_track_by_id, queue_post, get_recent_templates,
     get_recent_hook_templates, get_pending_tts_posts,
+    claim_next_pending_tts_post, claim_post_for_processing, claim_post_for_publish,
 )
 from core.charts import select_next_track, format_chart_badge
 from core.artwork import get_single_artwork
@@ -37,6 +38,10 @@ from core.video_renderer import render_tiktok_video, OUTPUT_DIR
 from core.tiktok_poster import upload_to_tiktok, build_caption, check_cookie_health
 
 logger = logging.getLogger(__name__)
+
+# In-process guard preventing two threads from rendering/publishing the same post_id concurrently
+_ACTIVE_POST_LOCK = threading.Lock()
+_ACTIVE_POST_IDS: set = set()
 
 # 1988: CD sales surpassed vinyl LPs and CDs became commonly available
 CD_ERA_START_YEAR = 1988
@@ -115,6 +120,14 @@ def _finalize_rendered_post(
             update_post_status(post_id, "rendered", error_message=health["reason"], db_path=db_path)
             prog_cb(f"Rendered video saved, skipped TikTok upload: {health['reason']}", 100)
         else:
+            claimed = claim_post_for_publish(post_id, allow_republish=False, db_path=db_path)
+            if not claimed:
+                logger.warning(
+                    "Skipping duplicate TikTok upload for post #%s (already publishing or posted).",
+                    post_id,
+                )
+                prog_cb("Post already publishing or published; skipped duplicate upload.", 100)
+                return get_post_by_id(post_id, db_path=db_path)
             auto_pub = get_setting("auto_publish", "false", db_path=db_path) == "true"
             prog_cb("Uploading to TikTok via stealth browser...", 92)
             try:
@@ -150,11 +163,13 @@ def enqueue_tts_post(
     auto_queue: Optional[bool] = None,
     voice_region: Optional[str] = None,
     custom_hook_text: Optional[str] = None,
+    initial_status: str = "tts_pending",
     db_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Immediately reserve a track, prepare its DJ hook script & regional voice routing,
-    and insert a post row with status='tts_pending' so the Web GUI displays it right away.
+    and insert a post row with status=initial_status (default 'tts_pending') so the
+    Web GUI displays it right away.
     """
     init_db(db_path)
 
@@ -201,7 +216,7 @@ def enqueue_tts_post(
         video_path=None,
         audio_url=None,
         artwork_path=artwork_path,
-        status="tts_pending",
+        status=initial_status,
         hook_text=hook_info["text"],
         hook_template_id=hook_info["hook_id"],
         voice_region=resolved_region,
@@ -222,12 +237,62 @@ def process_pending_post(
     """
     Complete TTS synthesis (unless render_without_tts=True), radio-ramp audio mixing,
     and Chromium Style Pack rendering for a pending/failed post.
+    Protected against concurrent execution on the same post_id.
     """
     init_db(db_path)
-    post = get_post_by_id(post_id, db_path=db_path)
-    if not post:
-        raise RuntimeError(f"Post #{post_id} not found.")
+    with _ACTIVE_POST_LOCK:
+        if post_id in _ACTIVE_POST_IDS:
+            logger.warning("Post #%s is already being processed; skipping duplicate run.", post_id)
+            existing = get_post_by_id(post_id, db_path=db_path)
+            if not existing:
+                raise RuntimeError(f"Post #{post_id} not found.")
+            return existing
+        _ACTIVE_POST_IDS.add(post_id)
 
+    try:
+        post = get_post_by_id(post_id, db_path=db_path)
+        if not post:
+            raise RuntimeError(f"Post #{post_id} not found.")
+
+        status = post.get("status")
+        if status in ("rendered", "scheduled", "publishing", "posted", "draft"):
+            logger.warning(
+                "Post #%s already in terminal/ready status '%s'; skipping duplicate processing.",
+                post_id, status,
+            )
+            return post
+
+        if status in ("tts_pending", "tts_failed", "failed"):
+            claimed = claim_post_for_processing(
+                post_id,
+                allowed_statuses=(status,),
+                target_status="rendering" if render_without_tts else "tts_processing",
+                db_path=db_path,
+            )
+            if not claimed:
+                logger.warning("Post #%s was already claimed by another worker; skipping.", post_id)
+                return get_post_by_id(post_id, db_path=db_path)
+            post = claimed
+
+        return _process_pending_post_impl(
+            post=post,
+            post_id=post_id,
+            render_without_tts=render_without_tts,
+            progress_cb=progress_cb,
+            db_path=db_path,
+        )
+    finally:
+        with _ACTIVE_POST_LOCK:
+            _ACTIVE_POST_IDS.discard(post_id)
+
+
+def _process_pending_post_impl(
+    post: Dict[str, Any],
+    post_id: int,
+    render_without_tts: bool = False,
+    progress_cb: Optional[Callable[[str, int], None]] = None,
+    db_path: Optional[str] = None,
+) -> Dict[str, Any]:
     def _prog(msg: str, pct: int):
         logger.info(f"[Post #{post_id} | {pct}%] {msg}")
         if progress_cb:
@@ -418,6 +483,7 @@ def generate_post_video(
                 auto_queue=auto_queue,
                 voice_region=voice_region,
                 custom_hook_text=custom_hook_text,
+                initial_status="tts_processing",
                 db_path=db_path,
             )
             return process_pending_post(pending["id"], progress_cb=progress_cb, db_path=db_path)
@@ -536,9 +602,8 @@ class TTSJobWorker:
     def _loop(self) -> None:
         while not self._stop_event.is_set():
             try:
-                pending = get_pending_tts_posts(db_path=self.db_path)
-                if pending:
-                    job = pending[0]
+                job = claim_next_pending_tts_post(db_path=self.db_path)
+                if job:
                     pid = job["id"]
                     self.active_post_id = pid
                     self.active_progress = 10

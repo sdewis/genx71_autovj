@@ -27,7 +27,8 @@ from core.db import (
     queue_post, get_queued_posts, remove_from_queue, reorder_queue, clear_queue,
     delete_post, get_track_batches, get_tracks_by_batch,
     upsert_post_analytics, get_analytics_reports, get_latest_analytics_report,
-    get_active_feedback_weights,
+    get_active_feedback_weights, claim_post_for_publish,
+    claim_post_for_processing, recover_interrupted_posts,
 )
 from core.analytics import (
     build_analytics_summary, sync_tiktok_analytics, import_analytics_file,
@@ -98,6 +99,9 @@ analytics_lock = threading.Lock()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    recovered = recover_interrupted_posts()
+    if any(recovered.values()):
+        logger.warning("Recovered interrupted posts on startup: %s", recovered)
     seed_charts_if_empty()
     daemon.start()
     tts_worker.start()
@@ -208,7 +212,7 @@ def api_status():
     posts = get_recent_posts(limit=500)
     posted_count = sum(1 for p in posts if p["status"] in ("posted", "draft"))
     queued_count = len(get_queued_posts())
-    tts_pending_count = sum(1 for p in posts if p["status"] in ("tts_pending", "rendering"))
+    tts_pending_count = sum(1 for p in posts if p["status"] in ("tts_pending", "tts_processing", "rendering"))
     cookie_health = check_cookie_health()
 
     return {
@@ -367,9 +371,9 @@ def api_delete_post(post_id: int):
     post = get_post_by_id(post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found.")
-    if post.get("status") == "rendering":
+    if post.get("status") in ("rendering", "tts_processing"):
         raise HTTPException(status_code=409, detail="Cannot delete a post while it is actively rendering.")
-    if publish_state["running"] and publish_state["post_id"] == post_id:
+    if post.get("status") == "publishing" or (publish_state["running"] and publish_state["post_id"] == post_id):
         raise HTTPException(status_code=409, detail="Cannot delete a post while it is uploading to TikTok.")
 
     deleted = delete_post(post_id)
@@ -403,9 +407,9 @@ def api_rerender_post(post_id: int, req: Optional[GenerateRequest] = None):
     post = get_post_by_id(post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found.")
-    if post.get("status") == "rendering":
+    if post.get("status") in ("rendering", "tts_processing"):
         raise HTTPException(status_code=409, detail="Cannot re-render a post while it is actively rendering.")
-    if publish_state["running"] and publish_state["post_id"] == post_id:
+    if post.get("status") == "publishing" or (publish_state["running"] and publish_state["post_id"] == post_id):
         raise HTTPException(status_code=409, detail="Cannot re-render a post while it is uploading to TikTok.")
 
     track_id = post.get("track_id")
@@ -515,6 +519,11 @@ def api_publish_post(post_id: int, auto_publish: Optional[bool] = None):
     if not post.get("video_path") or not os.path.exists(post["video_path"]):
         raise HTTPException(status_code=400, detail="Video file missing on disk.")
 
+    if post.get("status") == "publishing":
+        raise HTTPException(status_code=409, detail="This post is already being uploaded to TikTok.")
+    if post.get("status") == "posted":
+        raise HTTPException(status_code=409, detail="This post has already been published to TikTok.")
+
     health = check_cookie_health()
     if not health["healthy"]:
         raise HTTPException(status_code=400, detail=health["reason"])
@@ -527,6 +536,12 @@ def api_publish_post(post_id: int, auto_publish: Optional[bool] = None):
     with publish_lock:
         if publish_state["running"]:
             raise HTTPException(status_code=409, detail="A TikTok upload is already in progress.")
+        claimed = claim_post_for_publish(post_id, allow_republish=False)
+        if not claimed:
+            raise HTTPException(
+                status_code=409,
+                detail="Post is already uploading or has already been published to TikTok.",
+            )
         publish_state["running"] = True
         publish_state["post_id"] = post_id
         publish_state["label"] = label
@@ -876,7 +891,17 @@ def api_render_without_tts(post_id: int):
     post = get_post_by_id(post_id)
     if not post:
         raise HTTPException(status_code=404, detail="Post not found.")
-    update_post_fields(post_id, status="rendering", error_message=None, tts_enabled=0)
+    claimed = claim_post_for_processing(
+        post_id,
+        allowed_statuses=("tts_pending", "tts_failed", "failed"),
+        target_status="rendering",
+    )
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Post cannot be rendered without TTS from status '{post.get('status')}'.",
+        )
+    update_post_fields(post_id, error_message=None, tts_enabled=0)
 
     def _fallback_worker():
         try:

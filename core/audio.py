@@ -510,101 +510,113 @@ def prepare_track_audio(
             }
         logger.info(f"Cached clip for {artist} - {title} is {cached_dur}s (< {MIN_CLIP_DURATION}s); re-sourcing.")
 
-    raw_download = os.path.join(target_dir, f"{slug}_raw.dat")
-    raw_wav = os.path.join(target_dir, f"{slug}_raw.wav")
-    yt_base = os.path.join(target_dir, f"{slug}_yt")
+    import uuid
+    run_id = uuid.uuid4().hex[:8]
+    raw_download = os.path.join(target_dir, f"{slug}_{run_id}_raw.dat")
+    raw_wav = os.path.join(target_dir, f"{slug}_{run_id}_raw.wav")
+    yt_base = os.path.join(target_dir, f"{slug}_{run_id}_yt")
+    tmp_final_wav = os.path.join(target_dir, f"{slug}_{run_id}_out.wav")
     yt_out = None
     source_url = None
 
-    # 1. Prioritize yt-dlp full track so we can clip up to ~58s with pre-roll room
-    yt_out = fetch_youtube_audio(artist, title, yt_base)
-    if yt_out:
-        source_url = "youtube_full"
-        subprocess.run([
-            "ffmpeg", "-y", "-i", yt_out,
-            "-ar", "44100", "-ac", "2", raw_wav
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    else:
-        # 2. Fallback to Deezer / iTunes 30s studio previews
-        source_url = fetch_deezer_preview(artist, title) or fetch_itunes_preview(artist, title)
-        if not source_url:
-            raise RuntimeError(f"Could not source audio for {artist} - {title}")
-        resp = requests.get(source_url, headers=HEADERS, timeout=20)
-        resp.raise_for_status()
-        with open(raw_download, "wb") as f:
-            f.write(resp.content)
-        subprocess.run([
-            "ffmpeg", "-y", "-i", raw_download,
-            "-ar", "44100", "-ac", "2", raw_wav
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-    tts_duration = 0.0
-    ramp_start = 0.0
-    ramp_end = 0.0
-    if has_tts:
-        # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp.
-        # Allow total video length to expand dynamically beyond 60s if the DJ intro is long.
-        main_target = TARGET_TTS_MAIN_DURATION
-        hook_start, _ = find_intelligent_clip_window(
-            raw_wav,
-            target_duration=main_target,
-            min_duration=MIN_CLIP_DURATION,
-            max_duration=main_target + 4.0,
-        )
-        mix_info = mix_radio_ramp_audio(
-            raw_track_wav=raw_wav,
-            hook_start_sec=hook_start,
-            tts_wav_path=tts_audio_path,
-            out_wav_path=final_wav,
-            target_total_duration=target_total_duration,
-            main_music_duration=main_target,
-        )
-        tts_duration = mix_info["tts_duration"]
-        ramp_start = mix_info["ramp_start"]
-        ramp_end = mix_info["ramp_end"]
-    else:
-        start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=TARGET_CLIP_DURATION)
-        raw_clip_dur = max(1.0, min(MAX_CLIP_DURATION, end_sec - start_sec))
-        fade_out_start = max(0.0, raw_clip_dur - 1.2)
-
-        # Guarantee final clip duration is strictly >= 30.0s (e.g. pad slightly if a preview is 29.7s)
-        af_filters = [
-            "afade=t=in:st=0:d=0.4",
-            f"afade=t=out:st={fade_out_start:.2f}:d=1.2",
-            "loudnorm=I=-14:TP=-1.5:LRA=11",
-        ]
-        if raw_clip_dur < MIN_CLIP_DURATION:
-            pad_dur = MIN_CLIP_DURATION + 0.5
-            af_filters.append(f"apad=whole_dur={pad_dur:.2f}")
-            out_dur = pad_dur
+    try:
+        # 1. Prioritize yt-dlp full track so we can clip up to ~58s with pre-roll room
+        yt_out = fetch_youtube_audio(artist, title, yt_base)
+        if yt_out:
+            source_url = "youtube_full"
+            subprocess.run([
+                "ffmpeg", "-y", "-i", yt_out,
+                "-ar", "44100", "-ac", "2", raw_wav
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         else:
-            out_dur = raw_clip_dur
+            # 2. Fallback to Deezer / iTunes 30s studio previews
+            source_url = fetch_deezer_preview(artist, title) or fetch_itunes_preview(artist, title)
+            if not source_url:
+                raise RuntimeError(f"Could not source audio for {artist} - {title}")
+            resp = requests.get(source_url, headers=HEADERS, timeout=20)
+            resp.raise_for_status()
+            with open(raw_download, "wb") as f:
+                f.write(resp.content)
+            subprocess.run([
+                "ffmpeg", "-y", "-i", raw_download,
+                "-ar", "44100", "-ac", "2", raw_wav
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        subprocess.run([
-            "ffmpeg", "-y",
-            "-ss", str(start_sec),
-            "-t", f"{raw_clip_dur:.2f}",
-            "-i", raw_wav,
-            "-af", ",".join(af_filters),
-            "-t", f"{out_dur:.2f}",
-            "-ar", "44100", "-ac", "2",
-            final_wav
-        ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        tts_duration = 0.0
+        ramp_start = 0.0
+        ramp_end = 0.0
+        if has_tts:
+            # Locate the ideal chorus/hook start, then back up by tts_duration for the radio ramp.
+            # Allow total video length to expand dynamically beyond 60s if the DJ intro is long.
+            main_target = TARGET_TTS_MAIN_DURATION
+            hook_start, _ = find_intelligent_clip_window(
+                raw_wav,
+                target_duration=main_target,
+                min_duration=MIN_CLIP_DURATION,
+                max_duration=main_target + 4.0,
+            )
+            mix_info = mix_radio_ramp_audio(
+                raw_track_wav=raw_wav,
+                hook_start_sec=hook_start,
+                tts_wav_path=tts_audio_path,
+                out_wav_path=tmp_final_wav,
+                target_total_duration=target_total_duration,
+                main_music_duration=main_target,
+            )
+            tts_duration = mix_info["tts_duration"]
+            ramp_start = mix_info["ramp_start"]
+            ramp_end = mix_info["ramp_end"]
+        else:
+            start_sec, end_sec = find_intelligent_clip_window(raw_wav, target_duration=TARGET_CLIP_DURATION)
+            raw_clip_dur = max(1.0, min(MAX_CLIP_DURATION, end_sec - start_sec))
+            fade_out_start = max(0.0, raw_clip_dur - 1.2)
 
-    # Cleanup raw temp files
-    for p in (raw_download, raw_wav, yt_out):
-        if p and os.path.exists(p):
-            try:
-                os.remove(p)
-            except OSError:
-                pass
+            # Guarantee final clip duration is strictly >= 30.0s (e.g. pad slightly if a preview is 29.7s)
+            af_filters = [
+                "afade=t=in:st=0:d=0.4",
+                f"afade=t=out:st={fade_out_start:.2f}:d=1.2",
+                "loudnorm=I=-14:TP=-1.5:LRA=11",
+            ]
+            if raw_clip_dur < MIN_CLIP_DURATION:
+                pad_dur = MIN_CLIP_DURATION + 0.5
+                af_filters.append(f"apad=whole_dur={pad_dur:.2f}")
+                out_dur = pad_dur
+            else:
+                out_dur = raw_clip_dur
 
-    samples, sr = _load_wav_mono(final_wav)
+            subprocess.run([
+                "ffmpeg", "-y",
+                "-ss", str(start_sec),
+                "-t", f"{raw_clip_dur:.2f}",
+                "-i", raw_wav,
+                "-af", ",".join(af_filters),
+                "-t", f"{out_dur:.2f}",
+                "-ar", "44100", "-ac", "2",
+                tmp_final_wav
+            ], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        samples, sr = _load_wav_mono(tmp_final_wav)
+        final_dur = round(len(samples) / sr, 2)
+        if final_dur < MIN_CLIP_DURATION - 0.5:
+            raise RuntimeError(
+                f"Prepared audio for {artist} - {title} is unexpectedly short ({final_dur}s < {MIN_CLIP_DURATION}s); aborting render."
+            )
+
+        os.replace(tmp_final_wav, final_wav)
+    finally:
+        # Cleanup raw & temporary files
+        for p in (raw_download, raw_wav, yt_out, tmp_final_wav):
+            if p and os.path.exists(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
     features = extract_audio_features(final_wav, fps=30)
     return {
         "audio_path": final_wav,
         "source_url": source_url,
-        "duration": round(len(samples) / sr, 2),
+        "duration": final_dur,
         "rms_envelope": features["rms"],
         "audio_features": features,
         "tts_duration": tts_duration,

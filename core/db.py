@@ -315,12 +315,25 @@ def get_track_by_id(track_id: int, db_path: Optional[str] = None) -> Optional[Di
 
 # --- Deduplication & Availability Filtering ---
 
+ACTIVE_POST_STATUSES = (
+    "posted",
+    "rendered",
+    "scheduled",
+    "draft",
+    "tts_pending",
+    "tts_processing",
+    "rendering",
+    "publishing",
+)
+_ACTIVE_STATUS_SQL = ", ".join(f"'{s}'" for s in ACTIVE_POST_STATUSES)
+
+
 def is_track_posted(artist: str, title: str, db_path: Optional[str] = None) -> bool:
     conn = get_db(db_path)
-    row = conn.execute("""
+    row = conn.execute(f"""
         SELECT id FROM posts 
         WHERE LOWER(artist) = LOWER(?) AND LOWER(title) = LOWER(?)
-        AND status IN ('posted', 'rendered', 'scheduled', 'draft', 'tts_pending', 'rendering')
+        AND status IN ({_ACTIVE_STATUS_SQL})
     """, (artist.strip(), title.strip())).fetchone()
     return row is not None
 
@@ -339,10 +352,10 @@ def is_blacklisted(artist: str, title: Optional[str] = None, db_path: Optional[s
 
 def get_available_tracks(is_wildcard: Optional[bool] = None, db_path: Optional[str] = None) -> List[Dict[str, Any]]:
     conn = get_db(db_path)
-    query = """
+    query = f"""
         SELECT t.* FROM tracks t
         WHERE t.id NOT IN (
-            SELECT DISTINCT track_id FROM posts WHERE track_id IS NOT NULL AND status IN ('posted', 'rendered', 'scheduled', 'draft', 'tts_pending', 'rendering')
+            SELECT DISTINCT track_id FROM posts WHERE track_id IS NOT NULL AND status IN ({_ACTIVE_STATUS_SQL})
         )
         AND NOT EXISTS (
             SELECT 1 FROM blacklist b
@@ -640,14 +653,155 @@ def get_recent_hook_templates(limit: int = 12, db_path: Optional[str] = None) ->
 
 
 def get_pending_tts_posts(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Return posts waiting for async TTS generation / rendering (oldest first)."""
+    """Return posts waiting in the async TTS queue (oldest first).
+
+    Only includes 'tts_pending' so actively rendering/processing posts are never
+    picked up a second time by a concurrent worker.
+    """
     conn = get_db(db_path)
     cur = conn.execute("""
         SELECT * FROM posts
-        WHERE status IN ('tts_pending', 'rendering')
+        WHERE status = 'tts_pending'
         ORDER BY id ASC
     """)
     return [dict(r) for r in cur.fetchall()]
+
+
+def claim_next_pending_tts_post(db_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Atomically claim the oldest 'tts_pending' post by transitioning it to 'tts_processing'."""
+    conn = get_db(db_path)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("""
+            SELECT id FROM posts
+            WHERE status = 'tts_pending'
+            ORDER BY id ASC
+            LIMIT 1
+        """).fetchone()
+        if not row:
+            conn.execute("COMMIT")
+            return None
+        pid = row["id"]
+        cur = conn.execute("""
+            UPDATE posts
+            SET status = 'tts_processing', error_message = NULL
+            WHERE id = ? AND status = 'tts_pending'
+        """, (pid,))
+        if cur.rowcount == 0:
+            conn.execute("COMMIT")
+            return None
+        claimed = conn.execute("SELECT * FROM posts WHERE id = ?", (pid,)).fetchone()
+        conn.execute("COMMIT")
+        return dict(claimed) if claimed else None
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def claim_post_for_processing(
+    post_id: int,
+    allowed_statuses: tuple = ("tts_pending", "tts_failed", "failed"),
+    target_status: str = "tts_processing",
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically transition a post into an active processing state if its current status is allowed."""
+    if not allowed_statuses:
+        return None
+    placeholders = ", ".join("?" for _ in allowed_statuses)
+    conn = get_db(db_path)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        cur = conn.execute(
+            f"""
+            UPDATE posts
+            SET status = ?, error_message = NULL
+            WHERE id = ? AND status IN ({placeholders})
+            """,
+            (target_status, post_id, *allowed_statuses),
+        )
+        if cur.rowcount == 0:
+            conn.execute("COMMIT")
+            return None
+        claimed = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        conn.execute("COMMIT")
+        return dict(claimed) if claimed else None
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def claim_post_for_publish(
+    post_id: int,
+    allow_republish: bool = False,
+    db_path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Atomically claim a post for TikTok upload by transitioning it to 'publishing'.
+
+    Prevents concurrent uploads (e.g. daemon + TTSJobWorker + manual Publish click)
+    and blocks accidental re-uploads of already 'posted' videos unless allow_republish=True.
+    """
+    conn = get_db(db_path)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT status FROM posts WHERE id = ?", (post_id,)).fetchone()
+        if not row:
+            conn.execute("COMMIT")
+            return None
+        prev_status = row["status"]
+        if allow_republish:
+            allowed = prev_status != "publishing"
+        else:
+            allowed = prev_status in ("rendered", "scheduled", "failed", "draft")
+        if not allowed:
+            conn.execute("COMMIT")
+            return None
+        cur = conn.execute("""
+            UPDATE posts
+            SET status = 'publishing', queue_position = NULL, error_message = NULL
+            WHERE id = ? AND status = ?
+        """, (post_id, prev_status))
+        if cur.rowcount == 0:
+            conn.execute("COMMIT")
+            return None
+        if prev_status == "scheduled":
+            _compact_queue_positions(conn)
+        claimed = conn.execute("SELECT * FROM posts WHERE id = ?", (post_id,)).fetchone()
+        conn.execute("COMMIT")
+        return dict(claimed) if claimed else None
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+
+def recover_interrupted_posts(db_path: Optional[str] = None) -> Dict[str, int]:
+    """Recover posts left in transient in-progress states after an unclean shutdown.
+
+    - 'tts_processing' / 'rendering' with tts_enabled=1 -> reset to 'tts_pending'
+    - 'tts_processing' / 'rendering' with tts_enabled=0 -> mark 'failed'
+    - 'publishing' -> mark 'failed' (never auto-republish since TikTok may have received it)
+    """
+    conn = get_db(db_path)
+    with conn:
+        c_tts = conn.execute("""
+            UPDATE posts
+            SET status = 'tts_pending', error_message = NULL
+            WHERE status IN ('tts_processing', 'rendering') AND COALESCE(tts_enabled, 0) = 1
+        """).rowcount
+        c_render = conn.execute("""
+            UPDATE posts
+            SET status = 'failed', error_message = 'Render interrupted by server restart.'
+            WHERE status IN ('tts_processing', 'rendering') AND COALESCE(tts_enabled, 0) = 0
+        """).rowcount
+        c_pub = conn.execute("""
+            UPDATE posts
+            SET status = 'failed',
+                error_message = 'TikTok upload interrupted by restart; verify on TikTok before retrying.'
+            WHERE status = 'publishing'
+        """).rowcount
+    return {"requeued_tts": c_tts, "failed_renders": c_render, "interrupted_publishes": c_pub}
 
 
 
